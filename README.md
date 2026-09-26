@@ -1,4 +1,4 @@
-# Kickarse - The Best Open-Source Sidechain Plugin
+# Kickarse - The Best Free, Open-Source Sidechain Plugin
 
 Sidechain / ducking plugin for Windows — VST3, VST2 and CLAP, 64-bit.
 Five modes: **Sync**, **MIDI**, **Audio**, **Spectral** (24-band inverse EQ) and **Ring** (sidechain ring modulation),
