@@ -1,0 +1,5 @@
+# Kickarse shape
+version=1
+name=Ramp Down Curved
+category=Simple
+env=KE1 0,1,-0.6,0;1,0,0,0

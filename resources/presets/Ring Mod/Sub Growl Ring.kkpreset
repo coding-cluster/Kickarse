@@ -1,0 +1,10 @@
+# Kickarse preset
+version=1
+name=Sub Growl Ring
+category=Ring Mod
+author=Kickarse
+param.mode=Ring Mod
+param.ring_attack=1
+param.ring_release=20
+param.trig_source=Sync
+param.rate=1/4

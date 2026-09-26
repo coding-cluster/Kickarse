@@ -1,0 +1,10 @@
+# Kickarse preset
+version=1
+name=Low End Clarity
+category=Multiband
+author=Kickarse
+param.multi=1
+param.crossover=90
+param.hi_mix=40
+param.lo_mix=100
+param.slope=24 dB/oct

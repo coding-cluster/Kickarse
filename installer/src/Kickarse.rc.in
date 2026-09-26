@@ -1,0 +1,100 @@
+// Generated from Kickarse.rc.in by CMake configure_file(). Do not edit the .rc directly;
+// edit this template (or the CMakeLists.txt variables that feed it) instead.
+#include <windows.h>
+#include <commctrl.h>
+#include "resource.h"
+
+#pragma code_page(65001)
+
+/* ---------------------------------------------------------------- manifest */
+1 24 "@APP_MANIFEST_XML@"
+
+/* ------------------------------------------------------------------- icon */
+IDI_APPICON ICON "@APP_ICON_ICO@"
+
+/* --------------------------------------------------------- embedded payload */
+IDR_PAYLOAD_DATA     RCDATA "@PAYLOAD_DATA_BIN@"
+IDR_PAYLOAD_MANIFEST RCDATA "@PAYLOAD_MANIFEST_BIN@"
+
+/* -------------------------------------------------------------- version info */
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION @KICKARSE_VERSION_COMMA@
+ PRODUCTVERSION @KICKARSE_VERSION_COMMA@
+ FILEFLAGSMASK 0x3fL
+ FILEFLAGS 0x0L
+ FILEOS 0x40004L
+ FILETYPE 0x1L
+ FILESUBTYPE 0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904b0"
+        BEGIN
+            VALUE "CompanyName",      "Kickarse"
+            VALUE "FileDescription",  "Kickarse Setup"
+            VALUE "FileVersion",      "@KICKARSE_VERSION_STR@"
+            VALUE "InternalName",     "Kickarse-Setup"
+            VALUE "LegalCopyright",   "Copyright (C) Kickarse"
+            VALUE "OriginalFilename", "Kickarse-Setup.exe"
+            VALUE "ProductName",      "Kickarse"
+            VALUE "ProductVersion",   "@KICKARSE_VERSION_STR@"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END
+
+/* ------------------------------------------------------------------- pages */
+
+IDD_WELCOME DIALOGEX 0, 0, 317, 193
+STYLE DS_SHELLFONT | WS_CHILD | WS_VISIBLE
+FONT 9, "Segoe UI", 400, 0, 0x1
+BEGIN
+    ICON            IDI_APPICON, IDC_STATIC_WELCOMEICON, 14, 14, 20, 20
+    LTEXT           "Welcome to the Kickarse Setup Wizard", IDC_STATIC, 48, 14, 255, 22, SS_NOPREFIX
+    LTEXT           "This wizard installs Kickarse (VST3, VST2 and CLAP) on this computer.\n\nClick Next to choose which plug-in formats to install and where the VST2 version should go.\n\nClick Cancel to exit without installing anything.", IDC_STATIC_WELCOMETEXT, 48, 44, 255, 130
+END
+
+IDD_COMPONENTS DIALOGEX 0, 0, 317, 193
+STYLE DS_SHELLFONT | WS_CHILD | WS_VISIBLE
+FONT 9, "Segoe UI", 400, 0, 0x1
+BEGIN
+    LTEXT           "Select the plug-in formats you want to install:", IDC_STATIC_COMPONENTSHDR, 8, 8, 295, 14
+    CONTROL         "VST3", IDC_CHECK_VST3, "Button", BS_AUTOCHECKBOX | WS_TABSTOP, 8, 30, 100, 12
+    LTEXT           "Installed for all VST3 hosts (Bitwig, FL Studio, Ableton Live, Reaper, ...)", IDC_STATIC_VST3SUB, 24, 44, 275, 18
+    CONTROL         "VST2", IDC_CHECK_VST2, "Button", BS_AUTOCHECKBOX | WS_TABSTOP, 8, 66, 100, 12
+    LTEXT           "Classic VST 2.4 plug-in; you choose the folder on the next page.", IDC_STATIC_VST2SUB, 24, 80, 275, 18
+    CONTROL         "CLAP", IDC_CHECK_CLAP, "Button", BS_AUTOCHECKBOX | WS_TABSTOP, 8, 102, 200, 12
+    LTEXT           "for Bitwig / FL Studio / Reaper", IDC_STATIC_CLAPSUB, 24, 116, 275, 18
+END
+
+IDD_VST2DIR DIALOGEX 0, 0, 317, 193
+STYLE DS_SHELLFONT | WS_CHILD | WS_VISIBLE
+FONT 9, "Segoe UI", 400, 0, 0x1
+BEGIN
+    LTEXT           "VST2 plug-in folder:", IDC_STATIC_VST2LABEL, 8, 8, 295, 12
+    EDITTEXT        IDC_EDIT_VST2DIR, 8, 22, 230, 14, ES_AUTOHSCROLL | WS_TABSTOP
+    PUSHBUTTON      "Browse...", IDC_BUTTON_BROWSE, 244, 21, 60, 15, WS_TABSTOP
+    LTEXT           "FL Studio and Reaper scan this folder automatically. Bitwig scans it if it is on your VST2 search path (Settings > Locations).", IDC_STATIC_VST2NOTE, 8, 46, 300, 26
+    LTEXT           "Ableton Live does not scan it by default: open Live's Preferences > Plug-ins and point ""Use VST Plug-in Custom Folder"" at this same folder, then rescan.", IDC_STATIC_VST2NOTE2, 8, 76, 300, 40
+END
+
+IDD_INSTALLPAGE DIALOGEX 0, 0, 317, 193
+STYLE DS_SHELLFONT | WS_CHILD | WS_VISIBLE
+FONT 9, "Segoe UI", 400, 0, 0x1
+BEGIN
+    LTEXT           "Installing Kickarse...", IDC_STATIC, 8, 8, 295, 12
+    CONTROL         "", IDC_PROGRESS, "msctls_progress32", WS_BORDER, 8, 26, 300, 14
+    LTEXT           "Starting...", IDC_STATIC_STATUS, 8, 48, 300, 14, SS_PATHELLIPSIS
+END
+
+IDD_FINISH DIALOGEX 0, 0, 317, 193
+STYLE DS_SHELLFONT | WS_CHILD | WS_VISIBLE
+FONT 9, "Segoe UI", 400, 0, 0x1
+BEGIN
+    LTEXT           "Setup Complete", IDC_STATIC, 8, 8, 295, 16
+    LTEXT           "", IDC_STATIC_FINISHTEXT, 8, 28, 300, 110
+    LTEXT           "Tip: if your DAW was open during install, use its plug-in manager to rescan / rescan plug-ins so it picks up Kickarse.", IDC_STATIC_FINISHTIP, 8, 142, 300, 40
+END

@@ -1,0 +1,9 @@
+# Kickarse preset
+version=1
+name=Side-Only Pump
+category=Creative
+author=Kickarse
+param.mid_side=100
+param.mode=Sync
+param.rate=1/4
+param.depth=100

@@ -1,0 +1,5 @@
+# Kickarse shape
+version=1
+name=Hold and Snap
+category=Sidechain
+env=KE1 0,0,0,0;0.85,0,-0.5,0;1,1,0,0

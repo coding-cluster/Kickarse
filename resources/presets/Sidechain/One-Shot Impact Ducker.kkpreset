@@ -1,0 +1,10 @@
+# Kickarse preset
+version=1
+name=One-Shot Impact Ducker
+category=Sidechain
+author=Kickarse
+param.mode=Audio
+param.play_mode=One-shot
+param.threshold=-18
+param.length_ms=400
+state.envA=KE1 0,0,0,0;0.85,0,-0.5,0;1,1,0,0

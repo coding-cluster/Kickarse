@@ -1,0 +1,12 @@
+# Kickarse preset
+version=1
+name=Spectral Gate Chop
+category=Spectral
+author=Kickarse
+param.mode=Spectral
+param.trig_source=Sync
+param.rate=1/16
+param.spec_attack=1
+param.spec_release=40
+param.spec_range=24
+param.spec_target=Volume

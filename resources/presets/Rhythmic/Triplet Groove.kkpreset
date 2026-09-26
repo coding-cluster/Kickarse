@@ -1,0 +1,8 @@
+# Kickarse preset
+version=1
+name=Triplet Groove
+category=Rhythmic
+author=Kickarse
+param.mode=Sync
+param.rate=1/8T
+state.envA=KE1 0,0,-0.4,0;0.083333,1,0.1,0;0.166667,0,-0.4,0;0.25,1,0.1,0;0.333333,0,-0.4,0;0.416667,1,0.1,0;0.5,0,-0.4,0;0.583333,1,0.1,0;0.666667,0,-0.4,0;0.75,1,0.1,0;0.833333,0,-0.4,0;0.916667,1,0.1,0;1,0,0,0

@@ -1,0 +1,11 @@
+# Kickarse preset
+version=1
+name=Full Split Pump
+category=Multiband
+author=Kickarse
+param.multi=1
+param.crossover=300
+param.lo_mix=100
+param.hi_mix=100
+param.env_link=0
+state.envB=KE1 0,0,-0.2,0;0.06,1,0,0;1,1,0,0

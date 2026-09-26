@@ -1,0 +1,11 @@
+# Kickarse preset
+version=1
+name=Vocal Bus Declutter
+category=Spectral
+author=Kickarse
+param.mode=Spectral
+param.trig_source=Continuous
+param.spec_attack=10
+param.spec_release=200
+param.spec_range=12
+param.spec_sens=50

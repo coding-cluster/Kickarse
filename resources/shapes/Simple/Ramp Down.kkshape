@@ -1,0 +1,5 @@
+# Kickarse shape
+version=1
+name=Ramp Down
+category=Simple
+env=KE1 0,1,0,0;1,0,0,0

@@ -1,0 +1,9 @@
+# Kickarse preset
+version=1
+name=Smooth Ring Wash
+category=Ring Mod
+author=Kickarse
+param.mode=Ring Mod
+param.ring_attack=10
+param.ring_release=100
+param.trig_source=Continuous

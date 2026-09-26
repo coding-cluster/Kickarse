@@ -1,0 +1,9 @@
+# Kickarse preset
+version=1
+name=Mid-Side Sub Duck
+category=Multiband
+author=Kickarse
+param.multi=1
+param.crossover=150
+param.mid_side=-60
+param.hi_mix=20

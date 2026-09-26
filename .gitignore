@@ -1,0 +1,75 @@
+# Kickarse -- build trees live under %LOCALAPPDATA%\KickarseBuild\ (see docs/ARCHITECTURE.md),
+# never inside this folder, but ignore the usual suspects anyway in case one is created by mistake.
+build/
+build-*/
+out/
+cmake-build-*/
+
+# build.ps1 output (copied artefacts)
+dist/
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+CTestTestfile.cmake
+CMakeUserPresets.json
+compile_commands.json
+Testing/
+_deps/
+
+# Visual Studio / VS Code
+.vs/
+.vscode/
+*.user
+*.sln
+*.vcxproj
+*.vcxproj.filters
+*.vcxproj.user
+*.suo
+*.opendb
+*.VC.db
+*.VC.VC.opendb
+ipch/
+
+# JetBrains (CLion/Rider, in case anyone builds with those instead)
+.idea/
+
+# Compiler/linker output
+*.obj
+*.o
+*.pdb
+*.ilk
+*.iobj
+*.ipdb
+*.exp
+*.lib
+*.dll
+*.exe
+*.clap
+*.vst3
+
+# Claude Code local state (not shared project config)
+.claude/
+
+# Code-signing material
+*.pfx
+*.p12
+*.pem
+*.key
+
+# Logs and editor backup files
+*.log
+*~
+*.swp
+*.swo
+
+# OS junk
+Thumbs.db
+Desktop.ini
+.DS_Store
+._*
+
+# Python (tools/assets/*.py helper scripts)
+__pycache__/
+*.pyc

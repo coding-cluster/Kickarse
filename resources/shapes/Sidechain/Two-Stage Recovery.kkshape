@@ -1,0 +1,5 @@
+# Kickarse shape
+version=1
+name=Two-Stage Recovery
+category=Sidechain
+env=KE1 0,0,-0.3,0;0.25,0.6,0,0;0.6,0.6,-0.4,0;1,1,0,0

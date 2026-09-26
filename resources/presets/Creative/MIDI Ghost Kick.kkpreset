@@ -1,0 +1,8 @@
+# Kickarse preset
+version=1
+name=MIDI Ghost Kick
+category=Creative
+author=Kickarse
+param.mode=MIDI
+param.midi_note=36
+param.velocity=80

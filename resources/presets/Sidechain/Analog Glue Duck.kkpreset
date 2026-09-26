@@ -1,0 +1,10 @@
+# Kickarse preset
+version=1
+name=Analog Glue Duck
+category=Sidechain
+author=Kickarse
+param.mode=Sync
+param.rate=1/4
+param.depth=35
+param.smooth=40
+state.envA=KE1 0,0.25,0.2,0;0.3,0.65,-0.2,0;0.6,1,0,0;1,1,0,0

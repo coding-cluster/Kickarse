@@ -1,0 +1,12 @@
+# Kickarse preset
+version=1
+name=Wide Spectral Sweep
+category=Spectral
+author=Kickarse
+param.mode=Spectral
+param.spec_attack=20
+param.spec_release=300
+param.spec_range=30
+param.spec_sens=80
+param.trig_source=Sync
+param.rate=1/2

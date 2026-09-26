@@ -1,0 +1,13 @@
+# Kickarse preset
+version=1
+name=Tight Kick Duck
+category=Sidechain
+author=Kickarse
+param.mode=Audio
+param.trig_filter=1
+param.trig_lowcut=30
+param.trig_highcut=150
+param.threshold=-20
+param.depth=100
+param.length_ms=150
+state.envA=KE1 0,0,-0.8,0;0.1,1,0,0;1,1,0,0

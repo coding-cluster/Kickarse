@@ -1,0 +1,1583 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Kickarse UI prototype</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!--
+  Kickarse — high-fidelity interactive prototype (Phase 1).
+  The plugin surface is ONE <canvas> drawn with Canvas 2D calls that map 1:1 to NanoVG:
+    beginPath/moveTo/lineTo/bezierCurveTo/quadraticCurveTo/arc/rect  -> nvgBeginPath/MoveTo/LineTo/BezierTo/QuadTo/Arc/Rect
+    fill/stroke with colours, createLinearGradient/createRadialGradient -> nvgLinearGradient/nvgRadialGradient
+    boxGradient()   (below) reproduces nvgBoxGradient exactly: linear ramp over `feather` across a rounded-rect edge
+    drawImage       -> nvgImagePattern on a rect
+    fillText        -> nvgText (fonts are the same static TTFs the plugin embeds)
+  No CSS styling, filters, shadows or blend modes touch the plugin surface.
+  Layout numbers here ARE the spec: docs/design/DESIGN.md quotes them.
+  URL params:  ?scale=1..2   ?shot=<name> (deterministic states for screenshots)   ?freeze=<phase>   ?test=1 (interaction self-test)
+-->
+<style>
+  html, body { margin: 0; background: #2B2B2C; color: #aaa; font: 12px/1.4 system-ui, sans-serif; }
+  body { min-height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center; }
+  #wrap { position: relative; box-shadow: 0 10px 40px rgba(0,0,0,.45); }
+  canvas { display: block; outline: none; }
+  #dev { margin-top: 14px; display: flex; gap: 14px; align-items: center; opacity: .65; }
+  #dev button, #dev select { background: #3a3a3b; color: #ddd; border: 1px solid #4a4a4b; border-radius: 3px; padding: 3px 8px; font: inherit; }
+  body.shot #dev { display: none; }
+  body.shot { justify-content: flex-start; align-items: flex-start; }
+  body.shot #wrap { box-shadow: none; }
+</style>
+<script src="assets/embedded.js"></script>
+</head>
+<body>
+<div id="wrap"><canvas id="ui" tabindex="0"></canvas></div>
+<div id="dev">
+  <span>Prototype controls (not part of the plugin):</span>
+  <label>UI scale <select id="devScale"><option>1</option><option>1.25</option><option>1.5</option><option>1.75</option><option>2</option></select></label>
+  <button id="devPlay">Host: playing</button>
+  <button id="devShot">Save PNG</button>
+</div>
+<script>
+'use strict';
+// =============================================================================================
+// 0. Parameters (mirror of src/shared/Params.h)
+// =============================================================================================
+const RATES = [['4/1',16],['2/1',8],['1/1',4],['1/2',2],['1/2.',3],['1/2T',4/3],['1/4',1],['1/4.',1.5],['1/4T',2/3],
+  ['1/8',.5],['1/8.',.75],['1/8T',1/3],['1/16',.25],['1/16.',.375],['1/16T',1/6],['1/32',.125],['1/32T',1/12],['1/64',.0625]];
+const GRIDS = [['1/2',2],['1/4',1],['1/8',.5],['1/8T',1/3],['1/16',.25],['1/16T',1/6],['1/32',.125],['1/64',.0625]];
+const MODES = ['Sync','MIDI','Audio','Spectral','Ring'];          // UI labels (Params: "Ring Mod")
+const TRIG_SOURCES = ['Audio','Sync','MIDI','Free'];              // UI labels (Params: "Continuous")
+const PARAMS = {
+  bypass:{min:0,max:1,def:0}, mode:{min:0,max:4,def:0}, depth:{min:0,max:100,def:100,unit:'%'},
+  timeMode:{min:0,max:1,def:0}, rate:{min:0,max:17,def:6}, lengthMs:{min:5,max:4000,def:250,log:1,unit:'ms'},
+  playMode:{min:0,max:1,def:0}, rotate:{min:0,max:360,def:0,unit:'°'}, grid:{min:0,max:7,def:4},
+  swing:{min:0,max:100,def:0,unit:'%'}, smooth:{min:0,max:100,def:10,unit:'%'}, midSide:{min:-100,max:100,def:0},
+  outGain:{min:-24,max:12,def:0,unit:'dB'}, delta:{min:0,max:1,def:0},
+  multi:{min:0,max:1,def:0}, crossover:{min:20,max:20000,def:150,log:1,unit:'Hz'}, slope:{min:0,max:1,def:1},
+  loMix:{min:0,max:100,def:100,unit:'%'}, hiMix:{min:0,max:100,def:100,unit:'%'}, envLink:{min:0,max:1,def:1},
+  bandSolo:{min:0,max:2,def:0},
+  trigSource:{min:0,max:3,def:0}, threshold:{min:-60,max:0,def:-24,unit:'dB'}, retrigMs:{min:0,max:1000,def:60,unit:'ms'},
+  trigFilter:{min:0,max:1,def:0}, trigLowCut:{min:20,max:20000,def:20,log:1,unit:'Hz'}, trigHighCut:{min:20,max:20000,def:200,log:1,unit:'Hz'},
+  trigListen:{min:0,max:1,def:0}, midiNote:{min:-1,max:127,def:-1}, velocity:{min:0,max:100,def:0,unit:'%'},
+  specAttack:{min:.1,max:200,def:5,log:1,unit:'ms'}, specRelease:{min:1,max:2000,def:120,log:1,unit:'ms'},
+  specRange:{min:0,max:48,def:18,unit:'dB'}, specSens:{min:0,max:100,def:60,unit:'%'}, specTarget:{min:0,max:1,def:0},
+  ringAttack:{min:.01,max:50,def:.1,log:1,unit:'ms'}, ringRelease:{min:.1,max:500,def:5,log:1,unit:'ms'},
+};
+const NAMES = { depth:'Depth', lengthMs:'Length', rotate:'Rotate', swing:'Swing', smooth:'Smooth', midSide:'Mid/Side',
+  outGain:'Output', crossover:'Crossover', loMix:'Low mix', hiMix:'High mix', threshold:'Threshold', retrigMs:'Hold',
+  trigLowCut:'Trigger low cut', trigHighCut:'Trigger high cut', velocity:'Velocity', specAttack:'Attack', specRelease:'Release',
+  specRange:'Range', specSens:'Sensitivity', ringAttack:'Attack', ringRelease:'Release', midiNote:'Note' };
+const P = {}; for (const k in PARAMS) P[k] = PARAMS[k].def;
+
+function toNorm(k, v) { const d = PARAMS[k]; return d.log ? Math.log(v/d.min)/Math.log(d.max/d.min) : (v-d.min)/(d.max-d.min); }
+function fromNorm(k, n) { const d = PARAMS[k]; n = clamp(n,0,1); return d.log ? d.min*Math.pow(d.max/d.min, n) : d.min + n*(d.max-d.min); }
+function fmt(k, v = P[k]) {
+  switch (k) {
+    case 'depth': case 'loMix': case 'hiMix': case 'swing': case 'smooth': case 'velocity': case 'specSens': return `${Math.round(v)} %`;
+    case 'rotate': return `${Math.round(v)}°`;
+    case 'outGain': return `${v>0.05?'+':''}${Math.abs(v)<0.05?'0.0':v.toFixed(1).replace('-','−')} dB`;
+    case 'threshold': return `${v.toFixed(1).replace('-','−')} dB`;
+    case 'specRange': return `${v.toFixed(1)} dB`;
+    case 'crossover': case 'trigLowCut': case 'trigHighCut': return v >= 1000 ? `${(v/1000).toFixed(v>=10000?1:2)} kHz` : `${Math.round(v)} Hz`;
+    case 'lengthMs': case 'retrigMs': case 'specAttack': case 'specRelease': case 'ringAttack': case 'ringRelease':
+      return v < 1 ? `${v.toFixed(2)} ms` : v < 10 ? `${v.toFixed(1)} ms` : v >= 1000 ? `${(v/1000).toFixed(2)} s` : `${Math.round(v)} ms`;
+    case 'midSide': return Math.abs(v) < 0.5 ? 'Mid + Side' : v < 0 ? `Mid ${Math.round(-v)} %` : `Side ${Math.round(v)} %`;
+    case 'midiNote': return v < 0 ? 'Any note' : `${noteName(v)}  ·  ${Math.round(v)}`;
+  }
+  return String(v);
+}
+function noteName(n) { const N=['C','C♯','D','D♯','E','F','F♯','G','G♯','A','A♯','B']; n=Math.round(n); return N[n%12] + (Math.floor(n/12)-2); } // C3 = 60 (Ableton/Bitwig)
+
+// =============================================================================================
+// 1. Design tokens (docs/design/DESIGN.md §3)
+// =============================================================================================
+const W = 1080, H = 660;
+const C = {
+  ink0:'#0C0C0B', ink1:'#121211', ink2:'#181816', ink3:'#1E1D1B', ink4:'#262523', ink5:'#2F2E2B', ink6:'#3A3935', ink7:'#4A4843',
+  textDim:'#7E7A72', textMute:'#99958B', text:'#D5D0C5', textHi:'#F2EEE4',
+  duck:'#FFB81C', duckHi:'#FFD066', high:'#4DB2F5', highHi:'#8FD0FA', kick:'#FF4A3D',
+};
+const rgba = (hex, a) => { const n = parseInt(hex.slice(1),16); return `rgba(${n>>16},${(n>>8)&255},${n&255},${a})`; };
+const FONT = { sc:'KickSC', exp:'KickExp' };
+const clamp = (v,a,b) => v < a ? a : v > b ? b : v;
+const lerp = (a,b,t) => a + (b-a)*t;
+
+// =============================================================================================
+// 2. Envelope model (mirror of src/shared/Envelope.h; shape() is the proposed curve law)
+// =============================================================================================
+// shape(u,t) — identical to src/shared/Envelope.cpp: (e^{ku}-1)/(e^k-1), k = 6t. t > 0 eases in (holds the
+// start value longer), t < 0 leaves it quickly. shape(u,-t) = 1 - shape(1-u,t). Series near k = 0.
+function shape(u, t) { if (!(u > 0)) return 0; if (u >= 1) return 1; const k = clamp(t, -1, 1)*6;
+  if (Math.abs(k) < 1e-3) return u + 0.5*k*u*(u - 1); return clamp(Math.expm1(k*u)/Math.expm1(k), 0, 1); }
+class Envelope {
+  constructor(nodes) { this.n = nodes.map(o => ({x:o.x, y:o.y, t:o.t||0, qs:!!o.qs})); this.normalise(); }
+  clone() { return new Envelope(this.n); }
+  normalise() {
+    this.n.sort((a,b) => a.x - b.x);
+    for (const o of this.n) { o.x = clamp(o.x,0,1); o.y = clamp(o.y,0,1); o.t = clamp(o.t,-1,1); }
+    this.n[0].x = 0; this.n[this.n.length-1].x = 1;
+  }
+  evaluate(q) {
+    if (q < 0 || q > 1) q = q - Math.floor(q); const n = this.n; // 1.0 = end of cycle, not a wrap to 0
+    let i = 0; while (i < n.length-2 && q >= n[i+1].x) i++;
+    // vertical steps: pick the last node at this x
+    while (i < n.length-2 && n[i+1].x === n[i].x && q >= n[i+1].x) i++;
+    const a = n[i], b = n[i+1]; const dx = b.x - a.x;
+    if (dx <= 1e-9) return b.y;
+    return a.y + (b.y - a.y) * shape(clamp((q - a.x)/dx,0,1), a.t);
+  }
+}
+class PhaseMap {
+  constructor(rotate01, divisions, swing) { this.r = rotate01; this.d = Math.max(1, divisions); this.s = swing; }
+  warp(q) { // node -> timeline (swing only)
+    if (this.s <= 0) return q;
+    const pairs = this.d / 2, f = 0.5 + 0.25*this.s;
+    const x = q * pairs, k = Math.floor(x), u = x - k;
+    const w = u < 0.5 ? (u/0.5)*f : f + ((u-0.5)/0.5)*(1-f);
+    return Math.min(1, (k + w) / pairs);
+  }
+  unwarp(p) {
+    if (this.s <= 0) return p;
+    const pairs = this.d / 2, f = 0.5 + 0.25*this.s;
+    const x = p * pairs, k = Math.floor(x), w = x - k;
+    const u = w < f ? (w/f)*0.5 : 0.5 + ((w-f)/(1-f))*0.5;
+    return Math.min(1, (k + u) / pairs);
+  }
+  toTimeline(q) { const p = this.warp(q) + this.r; const f = p - Math.floor(p); return (f < 1e-9 && q > 0.5) ? 1 : f; }
+  toNode(p) { let x = p - this.r; const f = x - Math.floor(x); return this.unwarp((f < 1e-9 && p > 0.5 && this.r === 0) ? 1 : f); }
+}
+
+// =============================================================================================
+// 3. Shape library + presets (placeholder factory content in the spirit of the spec)
+// =============================================================================================
+function duck(len, tIn = -0.35, tOut = 0.5, floor = 0) {
+  const a = Math.max(0.04, len*0.35), b = Math.min(0.99, len);
+  return [{x:0,y:floor,t:tIn},{x:a,y:lerp(floor,1,0.55),t:tOut,qs:true},{x:b,y:0.985,t:0,qs:true},{x:1,y:1}];
+}
+function gate(steps, duty, lo = 0) {
+  const n = [{x:0,y:1}]; for (let i=0;i<steps;i++){ const s=i/steps, e=(i+duty)/steps; n.push({x:s,y:1},{x:s+0.0001,y:1}); n.push({x:e,y:1},{x:e,y:lo}); n.push({x:(i+1)/steps-0.0001,y:lo},{x:(i+1)/steps,y:1}); }
+  return clean(n);
+}
+function clean(n) { n.sort((a,b)=>a.x-b.x); n[0].x=0; n[n.length-1].x=1; return n; }
+const SHAPES = {
+  Sidechain: [
+    duck(0.62), duck(0.45,-0.2,0.6), duck(0.8,-0.5,0.35), duck(0.3,0,0.7), duck(0.95,-0.7,0.2), duck(0.55,0.3,0.45,0.1),
+    [{x:0,y:0,t:0},{x:0.12,y:0,t:0.6,qs:true},{x:0.6,y:1,t:0,qs:true},{x:1,y:1}],
+    [{x:0,y:0,t:0.8},{x:0.5,y:1,t:0},{x:1,y:1}],
+    [{x:0,y:0.2,t:0.4},{x:0.35,y:0.9,t:0.2},{x:1,y:1}],
+    [{x:0,y:0,t:-0.8},{x:0.9,y:1,t:0},{x:1,y:1}],
+    [{x:0,y:0,t:0},{x:0.2,y:0.02,t:0.5,qs:true},{x:0.45,y:0.98,t:0,qs:true},{x:1,y:1}],
+    [{x:0,y:0.45,t:0.5},{x:0.4,y:1,t:0},{x:1,y:1}],
+    [{x:0,y:0,t:0.3},{x:0.25,y:0.8,t:0},{x:0.5,y:0.2,t:0.3},{x:0.75,y:1,t:0},{x:1,y:1}],
+    [{x:0,y:0.1,t:-0.3},{x:0.7,y:0.7,t:0.6},{x:1,y:1}],
+    duck(0.5,-0.9,0.9), duck(0.7,0.6,0.1),
+  ],
+  Rhythmic: [ gate(4,0.5), gate(8,0.5), gate(4,0.25), gate(8,0.75), gate(3,0.5), gate(6,0.5), gate(16,0.5), gate(2,0.3),
+    [{x:0,y:0},{x:0.25,y:0},{x:0.25,y:1},{x:0.5,y:1},{x:0.5,y:0.3},{x:0.75,y:0.3},{x:0.75,y:1},{x:1,y:1}],
+    [{x:0,y:0,t:.6},{x:.25,y:1},{x:.25,y:0,t:.6},{x:.5,y:1},{x:.5,y:0,t:.6},{x:.75,y:1},{x:.75,y:0,t:.6},{x:1,y:1}],
+    [{x:0,y:0,t:.6},{x:.5,y:1},{x:.5,y:0,t:.6},{x:1,y:1}], gate(12,0.5), gate(5,0.6) ],
+  Simple: [ [{x:0,y:0},{x:1,y:1}], [{x:0,y:1},{x:1,y:0}], [{x:0,y:0},{x:.5,y:1},{x:1,y:0}], [{x:0,y:1},{x:.5,y:0},{x:1,y:1}],
+    [{x:0,y:0,t:.7},{x:1,y:1}], [{x:0,y:0,t:-.7},{x:1,y:1}], [{x:0,y:1,t:.7},{x:1,y:0}], [{x:0,y:1},{x:.5,y:1},{x:.5,y:0},{x:1,y:0}],
+    [{x:0,y:.5,t:.5},{x:.25,y:1,t:-.5},{x:.5,y:.5,t:.5},{x:.75,y:0,t:-.5},{x:1,y:.5}], [{x:0,y:1},{x:1,y:1}] ],
+  User: [ [{x:0,y:.05,t:.2},{x:.08,y:.1,t:.4},{x:.3,y:.82,t:.3},{x:.55,y:.97},{x:1,y:1}], [{x:0,y:0,t:.1},{x:.18,y:.35,t:.5},{x:.5,y:.99},{x:1,y:1}] ],
+};
+for (const cat in SHAPES) for (const sh of SHAPES[cat]) for (const o of sh) if (o.t) o.t = -o.t; // authored as 'positive = fast start'
+const SHAPE_NAMES = { Sidechain:'Duck', Rhythmic:'Gate', Simple:'Simple', User:'Captured' };
+const favShapes = new Set(['Sidechain:0','Rhythmic:1','Sidechain:10']);
+const PRESETS = [
+  ['Basics','Classic Pump',{}],['Basics','Soft Duck',{depth:70}],['Basics','Tight 1/8',{rate:9}],['Basics','Long Breath',{rate:3}],
+  ['Groove','Offbeat Bounce',{rate:9,swing:30}],['Groove','Swing House',{swing:55}],['Groove','Triplet Chug',{rate:8}],['Groove','Arse Kicker',{depth:100,rate:9}],
+  ['Spectral','Carve the Mud',{mode:3,specRange:18}],['Spectral','Ghost Duck',{mode:3,specRange:9,specSens:40}],['Spectral','Vocal Pocket',{mode:3,specRange:12}],
+  ['Ring Mod','Kick Carver',{mode:4}],['Ring Mod','Overlap Tamer',{mode:4,ringRelease:12}],
+  ['Multiband','Lows Only',{multi:1,hiMix:0}],['Multiband','Split Pump',{multi:1,envLink:0}],['Audio','Drum Bus Follower',{mode:2,trigFilter:1}],
+  ['Audio','Ghost Kick',{mode:2,threshold:-30}],['MIDI','Note Gate',{mode:1}],
+];
+const favPresets = new Set(['Classic Pump','Carve the Mud']);
+
+// =============================================================================================
+// 4. Session state
+// =============================================================================================
+const S = {
+  scale: 1, envA: new Envelope(SHAPES.Sidechain[0]), envB: new Envelope(duck(0.35,-0.2,0.7).map(o => ({...o, t: -(o.t||0)}))), editBand: 0,
+  tool: 0, snap: true, showIn: true, showSc: true, showOut: true, qsOn: true,
+  sel: new Set(), preset: 0, dirty: false, libTab: 'Sidechain', libPage: 0, libHover: -1,
+  overlay: null, menu: null, entry: null, hint: '', hostPlaying: true, rec: 0, recProgress: 0, recFlash: 0, capturedFlash: 0,
+  morph: null, trigFlash: 0, midiFlash: 0, savedFlash: 0, freeze: null,
+  undo: [], redo: [],
+};
+const curEnv = () => (P.multi && !P.envLink && S.editBand === 1) ? S.envB : S.envA;
+function snapshot() { return { a:S.envA.clone(), b:S.envB.clone(), p:{...P} }; }
+function pushUndo() { S.undo.push(snapshot()); if (S.undo.length > 100) S.undo.shift(); S.redo.length = 0; S.dirty = true; }
+function restore(s) { S.envA = s.a.clone(); S.envB = s.b.clone(); Object.assign(P, s.p); S.sel.clear(); }
+function undo() { if (!S.undo.length) return; S.redo.push(snapshot()); restore(S.undo.pop()); }
+function redo() { if (!S.redo.length) return; S.undo.push(snapshot()); restore(S.redo.pop()); }
+
+// =============================================================================================
+// 5. Fake engine: writes a Bridge-shaped object (src/shared/Bridge.h) every frame
+// =============================================================================================
+const BINS = 512, SPEC = 24;
+const B = { phase: 0, valueA: 1, valueB: 1, gr: 0, triggerCount: 0, active: 1, bpm: 124, playing: 1, cycleSeconds: .484,
+  mainWave: new Float32Array(BINS), extWave: new Float32Array(BINS), outWave: new Float32Array(BINS),
+  specCut: new Float32Array(SPEC), specSc: new Float32Array(SPEC), specHz: new Float32Array(SPEC), scPeakDb: -60, lastNote: 36, lastVel: 104 };
+for (let i=0;i<SPEC;i++) B.specHz[i] = 30*Math.pow(16000/30, i/(SPEC-1));
+let simT = 0, lastBeat = -1, sinceTrig = 1e9, rngS = 12345;
+const vnoise = x => { const i = Math.floor(x), f = x - i, h = n => { const s = Math.sin(n*127.1)*43758.5453; return s - Math.floor(s); }; const u = f*f*(3 - 2*f); return lerp(h(i), h(i+1), u)*2 - 1; };
+const rnd = () => ((rngS = (rngS*1103515245 + 12345) & 0x7fffffff) / 0x7fffffff);
+const specSmooth = new Float32Array(SPEC), specCutSmooth = new Float32Array(SPEC);
+function cycleBeats() { return P.timeMode ? 0 : RATES[Math.round(P.rate)][1]; }
+function cycleSec() { return P.timeMode ? P.lengthMs/1000 : cycleBeats()*60/B.bpm; }
+function phaseMap() { const cb = P.timeMode ? 1 : cycleBeats(); return new PhaseMap(P.rotate/360, cb / GRIDS[Math.round(P.grid)][1], P.swing/100); }
+function kickAt(tb) { // sidechain amplitude at time tb seconds after a kick
+  return tb < 0 ? 0 : 0.92*Math.exp(-tb/0.07) * (0.86 + 0.14*Math.cos(tb*2*Math.PI*(55 + 90*Math.exp(-tb/0.02))));
+}
+function engineStep(dt) {
+  if (!S.hostPlaying && P.mode === 0) { B.playing = 0; return; }
+  B.playing = S.hostPlaying ? 1 : 0;
+  simT += dt; B.cycleSeconds = cycleSec();
+  const beat = 60/B.bpm, beatIdx = Math.floor(simT/beat), tb = simT - beatIdx*beat;
+  const sc = kickAt(tb) + (tb > beat*0.5 ? 0.18*Math.exp(-(tb-beat*0.5)/0.03)*rnd() : 0); // kick + offbeat hat
+  const scDb = 20*Math.log10(Math.max(sc,1e-4)); B.scPeakDb = Math.max(scDb, B.scPeakDb - dt*40);
+  let trig = false;
+  if (beatIdx !== lastBeat) { lastBeat = beatIdx;
+    const src = (P.mode === 3 || P.mode === 4) ? P.trigSource : [1,2,0][Math.min(P.mode,2)] ;
+    // mode 0 Sync -> transport; 1 MIDI -> notes on beats; 2 Audio -> threshold
+    if (P.mode === 0 || src === 1) trig = false; // transport-locked: phase computed below
+    else if (src === 2 || P.mode === 1) { trig = true; S.midiFlash = 1; }
+    else if (src === 0 || P.mode === 2) trig = (-0.7 > P.threshold); // kick peak ~ -0.7 dBFS
+    else if (src === 3) trig = false;
+  }
+  const transport = (P.mode === 0) || ((P.mode === 3 || P.mode === 4) && P.trigSource === 1);
+  const cont = (P.mode === 3 || P.mode === 4) && P.trigSource === 3;
+  let ph = B.phase;
+  if (transport || cont) { ph = ((simT / B.cycleSeconds) % 1); B.active = 1; if (ph < B.phase - 0.5) { B.triggerCount++; S.trigFlash = 1; recTick(true); } }
+  else {
+    if (trig) { sinceTrig = 0; B.triggerCount++; S.trigFlash = 1; B.active = 1; recTick(true); } else sinceTrig += dt;
+    ph = sinceTrig / B.cycleSeconds;
+    if (ph >= 1) { if (P.playMode === 1) { ph = 0.99999; B.active = 0; } else ph = ph % 1; }
+  }
+  if (S.freeze !== null) ph = S.freeze;
+  const prev = B.phase; B.phase = ph;
+  recTick(false);
+  const map = phaseMap();
+  B.valueA = S.envA.evaluate(map.toNode(ph)); B.valueB = (P.envLink ? S.envA : S.envB).evaluate(map.toNode(ph));
+  const g = 1 - (P.depth/100)*(1 - B.valueA);
+  B.gr = 20*Math.log10(Math.max(g, 1e-3));
+  // waveforms: write every bin the playhead crossed this frame
+  const a = Math.floor(prev*BINS), b = Math.floor(ph*BINS);
+  const n = b >= a ? b - a : b + BINS - a;
+  for (let k = 0; k <= Math.min(n, BINS-1); k++) {
+    const bin = (a + k) % BINS, p = bin / BINS;
+    const t = p * B.cycleSeconds;
+    const bass = 0.56 * (0.86 + 0.10*Math.sin(p*Math.PI*6 + simT*0.7) + 0.025*vnoise(bin*0.12 + simT*3));
+    const kk = kickAt(t) * (0.94 + 0.06*vnoise(bin*0.37 + 11));
+    const gi = 1 - (P.depth/100) * (1 - S.envA.evaluate(map.toNode(p)));
+    B.mainWave[bin] = bass; B.extWave[bin] = kk; B.outWave[bin] = bass * gi;
+  }
+  // spectral bands
+  for (let i = 0; i < SPEC; i++) {
+    const f = B.specHz[i];
+    const kickE = kickAt(tb) * Math.exp(-Math.pow(Math.log(f/60),2)/1.6) + kickAt(tb)*0.25*Math.exp(-Math.pow(Math.log(f/3000),2)/1.2);
+    const hatE = (tb > beat*0.5 ? 0.3*Math.exp(-(tb-beat*0.5)/0.04) : 0) * Math.exp(-Math.pow(Math.log(f/9000),2)/0.8);
+    const lvl = 20*Math.log10(Math.max(kickE + hatE + 0.004, 1e-5));
+    specSmooth[i] = lvl > specSmooth[i] ? lvl : specSmooth[i] - dt * 60;
+    const norm = clamp((specSmooth[i] + 48)/48, 0, 1);
+    const target = -P.specRange * Math.pow(norm, 1.4) * (P.specSens/100 + 0.2) * (P.specTarget ? 1 : (1 - B.valueA) * (P.depth/100) + 0.15);
+    specCutSmooth[i] = target < specCutSmooth[i] ? lerp(specCutSmooth[i], target, 0.6) : lerp(specCutSmooth[i], target, dt*6);
+    B.specSc[i] = specSmooth[i]; B.specCut[i] = Math.max(-P.specRange, specCutSmooth[i]);
+  }
+}
+function recTick(atStart) { // Bridge recording handshake, simulated
+  if (S.rec === 1 && atStart) { S.rec = 2; S.recProgress = 0; S.recBuf = new Float32Array(256); }
+  if (S.rec === 2) {
+    const p = B.phase; S.recProgress = Math.max(S.recProgress, p);
+    const bin = Math.floor(p*256); S.recBuf[bin] = Math.max(S.recBuf[bin], kickAt(p*B.cycleSeconds));
+    if (p > 0.985) finishRecording();
+  }
+}
+function finishRecording() {
+  S.rec = 3; const buf = S.recBuf; let mx = 1e-6; for (const v of buf) mx = Math.max(mx, v);
+  const ys = Array.from(buf, v => 1 - clamp(v/mx,0,1)); // inverted: a kick produces a duck
+  for (let i = 1; i < ys.length; i++) ys[i] = Math.max(ys[i], ys[i-1] - 0.0); // monotone-ish recovery
+  const nodes = rdp(ys.map((y,i)=>({x:i/(ys.length-1), y})), 0.018);
+  pushUndo(); startMorph(new Envelope(nodes)); SHAPES.User.unshift(nodes); S.capturedFlash = 1; S.rec = 0;
+}
+function rdp(pts, eps) {
+  if (pts.length < 3) return pts;
+  let dmax = 0, idx = 0; const a = pts[0], b = pts[pts.length-1];
+  for (let i = 1; i < pts.length-1; i++) { const p = pts[i]; const d = Math.abs((b.y-a.y)*p.x - (b.x-a.x)*p.y + b.x*a.y - b.y*a.x) / Math.hypot(b.y-a.y, b.x-a.x); if (d > dmax) { dmax = d; idx = i; } }
+  if (dmax > eps) { const l = rdp(pts.slice(0, idx+1), eps), r = rdp(pts.slice(idx), eps); return l.slice(0,-1).concat(r); }
+  return [a, b];
+}
+function startMorph(target) { S.morph = { from: curEnv().clone(), to: target, t: 0 }; setCurEnv(target.clone()); }
+function setCurEnv(e) { if (P.multi && !P.envLink && S.editBand === 1) S.envB = e; else S.envA = e; S.sel.clear(); }
+
+// =============================================================================================
+// 6. Canvas + NanoVG-equivalent helpers
+// =============================================================================================
+const cv = document.getElementById('ui'); const g = cv.getContext('2d');
+let DPR = window.devicePixelRatio || 1;
+function resize() {
+  cv.width = Math.round(W*S.scale*DPR); cv.height = Math.round(H*S.scale*DPR);
+  cv.style.width = (W*S.scale)+'px'; cv.style.height = (H*S.scale)+'px';
+}
+function rr(x, y, w, h, r) { g.beginPath(); if (r <= 0) { g.rect(x,y,w,h); return; } g.roundRect(x, y, w, h, r); }
+function fillRR(x,y,w,h,r,col) { rr(x,y,w,h,r); g.fillStyle = col; g.fill(); }
+function strokeRR(x,y,w,h,r,col,lw=1) { rr(x,y,w,h,r); g.strokeStyle = col; g.lineWidth = lw; g.stroke(); }
+function line(x0,y0,x1,y1,col,lw=1) { g.beginPath(); g.moveTo(x0,y0); g.lineTo(x1,y1); g.strokeStyle = col; g.lineWidth = lw; g.stroke(); }
+// Exact nvgBoxGradient emulation: colour ramps linearly from icol to ocol over `f` px centred on the
+// rounded-rect edge (d = sdRoundRect; t = clamp((d + f/2)/f)). Drawn as 1 px rings, outermost first.
+function boxGradient(x,y,w,h,r,f,icol,oa,ocol='#000') {
+  const steps = Math.max(2, Math.ceil(f*2));
+  for (let i = steps; i >= 0; i--) {
+    const d = -f/2 + (i/steps)*f; const t = clamp((d + f/2)/f, 0, 1);
+    const a = lerp(oa, 0, t);
+    if (a <= 0.001) continue;
+    rr(x - d, y - d, w + 2*d, h + 2*d, Math.max(0, r + d)); g.strokeStyle = rgba(icol, a*(f/steps)*1.0 > 1 ? 1 : a); g.lineWidth = f/steps + 0.02; g.stroke();
+  }
+}
+function dropShadow(x,y,w,h,r,blur,alpha,dy=0,dx=0) { g.save(); boxGradient(x+dx, y+dy, w, h, r, blur, '#000000', alpha); g.restore(); }
+function text(str, x, y, {size=11, font=FONT.sc, weight=500, col=C.text, align='left', base='middle', track=0} = {}) {
+  g.font = `${weight} ${size}px ${font}`; g.fillStyle = col; g.textAlign = align; g.textBaseline = base;
+  g.letterSpacing = track ? track+'px' : '0px'; g.fillText(str, x, y); return g.measureText(str).width;
+}
+function measure(str, size=11, font=FONT.sc, weight=500) { g.font = `${weight} ${size}px ${font}`; g.letterSpacing='0px'; return g.measureText(str).width; }
+
+// Panel treatments ---------------------------------------------------------------------------
+function well(x,y,w,h,r=3) { // recessed display: dark fill, inner shadow on top edge, catch-light on bottom edge
+  fillRR(x,y,w,h,r,C.ink1);
+  g.save(); rr(x,y,w,h,r); g.clip();
+  const lg = g.createLinearGradient(0,y,0,y+6); lg.addColorStop(0,'rgba(0,0,0,0.55)'); lg.addColorStop(1,'rgba(0,0,0,0)');
+  g.fillStyle = lg; g.fillRect(x,y,w,6); g.restore();
+  line(x+r, y+h-0.5, x+w-r, y+h-0.5, 'rgba(255,248,235,0.055)');
+}
+function raised(x,y,w,h,r,fill,hover=0) { // raised key: fill, top light edge, bottom dark edge, 1px contact shadow
+  fillRR(x, y+1, w, h, r, 'rgba(0,0,0,0.35)');
+  fillRR(x,y,w,h,r, hover ? mixHex(fill, C.ink6, hover*0.45) : fill);
+  g.save(); rr(x,y,w,h,r); g.clip();
+  line(x+1, y+0.5, x+w-1, y+0.5, 'rgba(255,248,235,0.075)');
+  g.restore();
+}
+function mixHex(a, b, t) { const A = parseInt(a.slice(1),16), Bn = parseInt(b.slice(1),16);
+  const m = (s) => Math.round(lerp((A>>s)&255, (Bn>>s)&255, t)); return `rgb(${m(16)},${m(8)},${m(0)})`; }
+function groove(x0,y0,x1,y1) { // machined separation line: dark line + light line below/right
+  if (y0 === y1) { line(x0,y0+0.5,x1,y1+0.5,'rgba(0,0,0,0.55)'); line(x0,y0+1.5,x1,y1+1.5,'rgba(255,248,235,0.045)'); }
+  else { line(x0+0.5,y0,x1+0.5,y1,'rgba(0,0,0,0.55)'); line(x0+1.5,y0,x1+1.5,y1,'rgba(255,248,235,0.045)'); }
+}
+function lamp(x, y, on, col, s=6) { // square LED lamp with soft bloom when lit
+  if (on) { const rg = g.createRadialGradient(x, y, 0, x, y, s*1.8); rg.addColorStop(0, rgba(col, 0.35*on)); rg.addColorStop(1, rgba(col, 0));
+    g.fillStyle = rg; g.fillRect(x-s*2, y-s*2, s*4, s*4); }
+  fillRR(x-s/2, y-s/2, s, s, 1.5, on ? col : C.ink0);
+  if (!on) strokeRR(x-s/2+0.5, y-s/2+0.5, s-1, s-1, 1, 'rgba(255,248,235,0.08)');
+  else line(x-s/2+1.5, y-s/2+1, x+s/2-1.5, y-s/2+1, 'rgba(255,255,255,0.55)');
+}
+
+// =============================================================================================
+// 7. Immediate-mode interaction layer
+// =============================================================================================
+const ui = { mx:-1, my:-1, regions: [], live: [], hot: null, active: null, anim: {}, lastClick: {id:null, t:0}, mods:{shift:0,ctrl:0,alt:0} };
+function region(id, x, y, w, h, hd = {}) { ui.regions.push({ id, x, y, w, h, ...hd }); return ui.hot === id || ui.active === id; }
+function hov(id, speed = 12) { const target = (ui.hot === id || ui.active === id) ? 1 : 0; const a = ui.anim[id] ?? 0; const v = a + (target - a)*Math.min(1, speed*frameDt); ui.anim[id] = v; return v; }
+function hitTest(x, y) { for (let i = ui.live.length-1; i >= 0; i--) { const r = ui.live[i]; if (x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h) return r; } return null; }
+function toLocal(e) { const b = cv.getBoundingClientRect(); return [(e.clientX - b.left)/S.scale, (e.clientY - b.top)/S.scale]; }
+function mods(e) { ui.mods = { shift: e.shiftKey, ctrl: e.ctrlKey || e.metaKey, alt: e.altKey }; }
+cv.addEventListener('mousemove', e => { mods(e); const [x,y] = toLocal(e); const dx = x - ui.mx, dy = y - ui.my; ui.mx = x; ui.my = y;
+  if (ui.active) { ui.active.onDrag && ui.active.onDrag(x, y, dx, dy, ui.mods); }
+  else { const r = hitTest(x,y); ui.hot = r ? r.id : null; cv.style.cursor = r && r.cursor || 'default'; S.hint = r && r.hint || ''; } });
+cv.addEventListener('mouseleave', () => { if (!ui.active) { ui.hot = null; S.hint = ''; } });
+cv.addEventListener('mousedown', e => { mods(e); cv.focus(); const [x,y] = toLocal(e); ui.mx = x; ui.my = y;
+  if (e.button === 2) return; const r = hitTest(x,y);
+  if (S.entry && (!r || r.id !== 'entry')) commitEntry();
+  if (!r) return;
+  const now = performance.now(), dbl = ui.lastClick.id === r.id && now - ui.lastClick.t < 320;
+  ui.lastClick = { id: r.id, t: dbl ? 0 : now };
+  if (dbl && r.onDbl) { r.onDbl(x, y, ui.mods); return; }
+  ui.active = r; r.onDown && r.onDown(x, y, ui.mods); });
+window.addEventListener('mouseup', e => { mods(e); if (ui.active) { const a = ui.active; ui.active = null; a.onUp && a.onUp(ui.mx, ui.my, ui.mods); } });
+cv.addEventListener('wheel', e => { e.preventDefault(); mods(e); const [x,y] = toLocal(e); const r = hitTest(x,y); if (r && r.onWheel) r.onWheel(-Math.sign(e.deltaY), ui.mods); }, { passive: false });
+cv.addEventListener('contextmenu', e => { e.preventDefault(); mods(e); const [x,y] = toLocal(e); const r = hitTest(x,y); if (r && r.onContext) r.onContext(x, y); });
+cv.addEventListener('keydown', e => {
+  mods(e);
+  if (S.entry) { entryKey(e); e.preventDefault(); return; }
+  if (e.key === 'Escape') { S.menu = null; S.overlay = null; S.sel.clear(); }
+  if ((e.ctrlKey||e.metaKey) && e.key.toLowerCase() === 'z') { e.shiftKey ? redo() : undo(); e.preventDefault(); }
+  if ((e.ctrlKey||e.metaKey) && e.key.toLowerCase() === 'y') { redo(); e.preventDefault(); }
+  if ((e.ctrlKey||e.metaKey) && e.key.toLowerCase() === 'a') { const env = curEnv(); S.sel = new Set(env.n.map((_,i)=>i)); e.preventDefault(); }
+  if ((e.key === 'Delete' || e.key === 'Backspace') && S.sel.size) { deleteSelected(); e.preventDefault(); }
+  if ((e.ctrlKey||e.metaKey) && e.key.toLowerCase() === 's') { S.dirty = false; S.savedFlash = 1; e.preventDefault(); }
+  if (S.overlay === 'presets' && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) { loadPreset((S.preset + (e.key === 'ArrowDown' ? 1 : PRESETS.length - 1)) % PRESETS.length); e.preventDefault(); return; }
+  if (S.overlay === 'presets' && e.key === 'Enter') { S.overlay = null; e.preventDefault(); return; }
+  if (!S.overlay && S.sel.size && e.key.startsWith('Arrow')) { // nudge: x by one grid cell (Shift: 1/8), y by 1 % (Shift: 0.1 %)
+    const env = curEnv(), map = phaseMap(), last = env.n.length - 1; pushUndo();
+    const dx = e.key === 'ArrowLeft' ? -1 : e.key === 'ArrowRight' ? 1 : 0, dy = e.key === 'ArrowUp' ? 1 : e.key === 'ArrowDown' ? -1 : 0;
+    for (const i of S.sel) { const o = env.n[i];
+      if (dx && i !== 0 && i !== last) o.x = clamp(o.x + dx / map.d * (e.shiftKey ? 0.125 : 1), env.n[i-1].x, env.n[i+1].x);
+      if (dy) o.y = clamp(o.y + dy * (e.shiftKey ? 0.001 : 0.01), 0, 1); }
+    e.preventDefault(); }
+});
+window.addEventListener('keyup', mods);
+
+// Parameter gestures shared by knobs, fields and sliders ----------------------------------------
+function paramDrag(k, pxPerRange = 200, horizontal = false) {
+  let start = 0, acc = 0;
+  return {
+    onDown: (x, y, m) => {
+      if (m.ctrl) { pushUndo(); P[k] = PARAMS[k].def; ui.active = null; return; }
+      if (m.alt) { openEntry(k); ui.active = null; return; }
+      pushUndo(); start = toNorm(k, P[k]); acc = 0; },
+    onDrag: (x, y, dx, dy, m) => { acc += (horizontal ? dx : -dy) * (m.shift ? 0.1 : 1) / pxPerRange; setParam(k, fromNorm(k, start + acc)); },
+    onDbl: () => { pushUndo(); P[k] = PARAMS[k].def; },
+    onWheel: (d, m) => { pushUndo(); setParam(k, fromNorm(k, toNorm(k, P[k]) + d * (m.shift ? 0.002 : 0.02))); },
+    onContext: (x, y) => openMenu(x, y, [
+      { label: `Reset to default  (${fmt(k, PARAMS[k].def)})`, act: () => { pushUndo(); P[k] = PARAMS[k].def; } },
+      { label: 'Type a value…', act: () => openEntry(k) }, null,
+      { label: 'Copy value', act: () => { S.clip = P[k]; } }, { label: 'Paste value', act: () => { if (S.clip !== undefined) { pushUndo(); setParam(k, S.clip); } }, dim: S.clip === undefined }]),
+    cursor: horizontal ? 'ew-resize' : 'ns-resize',
+    hint: `${NAMES[k] || k}  ${fmt(k)}   —   drag · Shift fine · double-click reset · Alt-click type · right-click menu`,
+  };
+}
+function setParam(k, v) { const d = PARAMS[k]; P[k] = clamp(v, d.min, d.max); S.dirty = true; }
+
+// Value entry popover ---------------------------------------------------------------------------
+function openEntry(k) { S.entry = { k, text: String(+P[k].toFixed(k==='crossover'?0:2)), all: true }; }
+function entryKey(e) {
+  const E = S.entry;
+  if (e.key === 'Enter') commitEntry();
+  else if (e.key === 'Escape') S.entry = null;
+  else if (e.key === 'Backspace') { E.text = E.all ? '' : E.text.slice(0,-1); E.all = false; }
+  else if (e.key.length === 1 && /[0-9.\-kK]/.test(e.key)) { E.text = (E.all ? '' : E.text) + e.key; E.all = false; }
+}
+function commitEntry() { const E = S.entry; if (!E) return; let t = E.text.toLowerCase(); let v = parseFloat(t);
+  if (!isNaN(v)) { if (t.endsWith('k')) v *= 1000; pushUndo(); setParam(E.k, v); } S.entry = null; }
+
+// Menus -----------------------------------------------------------------------------------------
+function openMenu(x, y, items, opts = {}) { S.menu = { x, y, items, ...opts }; }
+
+// =============================================================================================
+// 8. Icons: 14 px grid, 1.5 px strokes, square caps, drawn from the centre (cx, cy)
+// =============================================================================================
+function icon(name, cx, cy, col, s = 1) {
+  g.save(); g.translate(cx, cy); g.scale(s, s); g.strokeStyle = col; g.fillStyle = col; g.lineWidth = 1.5; g.lineCap = 'square'; g.lineJoin = 'miter';
+  g.beginPath();
+  switch (name) {
+    case 'select': g.moveTo(-3.5,-6); g.lineTo(-3.5,5); g.lineTo(-0.8,2.4); g.lineTo(1.3,6.5); g.lineTo(3,5.6); g.lineTo(1,1.6); g.lineTo(4.5,1.6); g.closePath(); g.fill(); break;
+    case 'line': g.moveTo(-4.5,4.5); g.lineTo(4.5,-4.5); g.stroke(); g.fillRect(-6.5,2.5,4,4); g.fillRect(2.5,-6.5,4,4); break;
+    case 'pencil': g.moveTo(-5.5,5.5); g.lineTo(-5,2.5); g.lineTo(3,-5.5); g.lineTo(5.5,-3); g.lineTo(-2.5,5); g.closePath(); g.lineCap='butt'; g.lineJoin='round'; g.stroke(); g.beginPath(); g.moveTo(1,-3.5); g.lineTo(3.5,-1); g.stroke(); break;
+    case 'prev': g.moveTo(2,-4.5); g.lineTo(-2.5,0); g.lineTo(2,4.5); g.lineCap='round'; g.lineJoin='round'; g.stroke(); break;
+    case 'next': g.moveTo(-2,-4.5); g.lineTo(2.5,0); g.lineTo(-2,4.5); g.lineCap='round'; g.lineJoin='round'; g.stroke(); break;
+    case 'caret': g.moveTo(-3.5,-1.5); g.lineTo(3.5,-1.5); g.lineTo(0,2.5); g.closePath(); g.fill(); break;
+    case 'browse': for (const yy of [-4,0,4]) { g.fillRect(-5.5, yy-0.75, 2, 1.5); g.fillRect(-2, yy-0.75, 7.5, 1.5); } break;
+    case 'save': g.moveTo(0,-6); g.lineTo(0,1.5); g.moveTo(-3.2,-1.5); g.lineTo(0,1.7); g.lineTo(3.2,-1.5); g.moveTo(-5.5,1.5); g.lineTo(-5.5,5.5); g.lineTo(5.5,5.5); g.lineTo(5.5,1.5); g.lineCap='butt'; g.stroke(); break;
+    case 'star': case 'starOn': for (let i = 0; i < 10; i++) { const a = -Math.PI/2 + i*Math.PI/5, r = i%2 ? 2.6 : 6; g.lineTo(Math.cos(a)*r, Math.sin(a)*r+0.4); } g.closePath(); g.lineJoin='round'; if (name==='starOn') g.fill(); else { g.lineWidth=1.3; g.stroke(); } break;
+    case 'undo': g.moveTo(-5,-2); g.lineTo(2,-2); g.quadraticCurveTo(5.5,-2,5.5,1.5); g.quadraticCurveTo(5.5,5,2,5); g.lineTo(-1,5); g.lineCap='butt'; g.stroke(); g.beginPath(); g.moveTo(-2,-5.5); g.lineTo(-5.5,-2); g.lineTo(-2,1.5); g.stroke(); break;
+    case 'redo': g.scale(-1,1); g.moveTo(-5,-2); g.lineTo(2,-2); g.quadraticCurveTo(5.5,-2,5.5,1.5); g.quadraticCurveTo(5.5,5,2,5); g.lineTo(-1,5); g.lineCap='butt'; g.stroke(); g.beginPath(); g.moveTo(-2,-5.5); g.lineTo(-5.5,-2); g.lineTo(-2,1.5); g.stroke(); break;
+    case 'more': for (const xx of [-5,0,5]) { g.moveTo(xx+1.3,0); g.arc(xx,0,1.3,0,Math.PI*2); } g.fill(); break;
+    case 'power': g.arc(0,0.8,5,-Math.PI*0.28 - Math.PI/2 + Math.PI, Math.PI*0.28 - Math.PI/2 + Math.PI*2 - Math.PI, true); g.lineCap='round'; g.stroke(); g.beginPath(); g.moveTo(0,-6); g.lineTo(0,-0.5); g.lineCap='round'; g.stroke(); break;
+    case 'link': g.lineWidth=1.4; g.rotate(-Math.PI/4); g.roundRect(-7,-2.6,8.4,5.2,2.6); g.roundRect(-1.4,-2.6,8.4,5.2,2.6); g.stroke(); break;
+    case 'unlink': g.lineWidth=1.4; g.rotate(-Math.PI/4); g.roundRect(-8.2,-2.6,6.6,5.2,2.6); g.roundRect(1.6,-2.6,6.6,5.2,2.6); g.stroke(); g.beginPath(); g.rotate(Math.PI/4); g.moveTo(-3.5,-5.5); g.lineTo(-2.5,-3.8); g.moveTo(3.5,5.5); g.lineTo(2.5,3.8); g.lineWidth=1.2; g.stroke(); break;
+    case 'phones': g.lineWidth=1.5; g.lineCap='butt'; g.arc(0,1.5,5.2,Math.PI*1.08,Math.PI*1.92); g.stroke(); g.beginPath(); g.roundRect(-6.6,0.2,3.4,5.8,1.2); g.roundRect(3.2,0.2,3.4,5.8,1.2); g.fill(); break;
+    case 'rec': g.arc(0,0,4,0,Math.PI*2); g.fill(); break;
+    case 'stop': g.fillRect(-3.5,-3.5,7,7); break;
+    case 'loop': g.lineWidth=1.4; g.moveTo(-5,1); g.lineTo(-5,-1); g.quadraticCurveTo(-5,-4,-2,-4); g.lineTo(4,-4); g.moveTo(5,-1); g.lineTo(5,1); g.quadraticCurveTo(5,4,2,4); g.lineTo(-4,4); g.lineCap='butt'; g.stroke(); g.beginPath(); g.moveTo(2,-6.3); g.lineTo(4.6,-4); g.lineTo(2,-1.7); g.moveTo(-2,1.7); g.lineTo(-4.6,4); g.lineTo(-2,6.3); g.stroke(); break;
+    case 'oneshot': g.lineWidth=1.4; g.moveTo(-6,0); g.lineTo(3,0); g.lineCap='butt'; g.stroke(); g.beginPath(); g.moveTo(0,-3); g.lineTo(3.2,0); g.lineTo(0,3); g.stroke(); g.fillRect(4.5,-5,1.6,10); break;
+    case 'delta': g.lineWidth=1.4; g.moveTo(0,-5.5); g.lineTo(5.8,4.8); g.lineTo(-5.8,4.8); g.closePath(); g.lineJoin='miter'; g.stroke(); break;
+    case 'plus': g.moveTo(-5,0); g.lineTo(5,0); g.moveTo(0,-5); g.lineTo(0,5); g.stroke(); break;
+    case 'close': g.moveTo(-4.5,-4.5); g.lineTo(4.5,4.5); g.moveTo(4.5,-4.5); g.lineTo(-4.5,4.5); g.stroke(); break;
+    case 'grip': g.lineWidth=1; for (const o of [0,3.5,7]) { g.moveTo(5-o,5); g.lineTo(5,5-o); } g.stroke(); break;
+    case 'shift': g.lineWidth=1.4; g.moveTo(-6,0); g.lineTo(6,0); g.moveTo(-3.5,-2.5); g.lineTo(-6,0); g.lineTo(-3.5,2.5); g.moveTo(3.5,-2.5); g.lineTo(6,0); g.lineTo(3.5,2.5); g.lineCap='butt'; g.stroke(); break;
+    case 'folder': g.lineWidth=1.4; g.moveTo(-6,-4); g.lineTo(-2,-4); g.lineTo(-0.5,-2.5); g.lineTo(6,-2.5); g.lineTo(6,4.5); g.lineTo(-6,4.5); g.closePath(); g.stroke(); break;
+    case 'search': g.lineWidth=1.5; g.arc(-1,-1,4,0,Math.PI*2); g.moveTo(2,2); g.lineTo(5.5,5.5); g.stroke(); break;
+  }
+  g.restore();
+}
+
+// =============================================================================================
+// 9. Controls
+// =============================================================================================
+function iconButton(id, name, x, y, w, h, {on=false, onClick, hint='', col, disabled=false, activeCol=C.duck} = {}) {
+  const hv = disabled ? 0 : hov(id);
+  if (!disabled) region(id, x, y, w, h, { onDown: onClick, hint, cursor: 'pointer' });
+  if (hv > 0.01) fillRR(x, y, w, h, 3, `rgba(255,248,235,${0.05*hv})`);
+  icon(name, x + w/2, y + h/2, col || (disabled ? C.textDim : on ? activeCol : mixHex(C.textMute, C.textHi, hv)));
+}
+function lampButton(id, label, x, y, w, h, on, onClick, {col = C.duck, hint = '', icn = null} = {}) {
+  const hv = hov(id);
+  region(id, x, y, w, h, { onDown: onClick, hint, cursor: 'pointer' });
+  raised(x, y, w, h, 3, C.ink4, hv);
+  lamp(x + 11, y + h/2, on ? 1 : 0, col, 5);
+  const tx = x + 20;
+  if (icn) { icon(icn, tx + 6, y + h/2, on ? C.textHi : C.textMute, 0.85); text(label, tx + 15, y + h/2 + 0.5, { col: on ? C.textHi : mixHex(C.textMute, C.text, hv) }); }
+  else text(label, tx, y + h/2 + 0.5, { col: on ? C.textHi : mixHex(C.textMute, C.text, hv) });
+}
+function segmented(id, x, y, w, h, labels, value, onPick, {col = null, disabled = false, icons = null, fixed = false} = {}) {
+  // recessed track; selected segment is a raised key. Segment widths follow label widths (optical balance).
+  well(x, y, w, h, 3);
+  const widths = labels.map(l => measure(l, 11) + (icons ? 16 : 0));
+  const sum = widths.reduce((a,b)=>a+b,0), extra = (w - 4 - sum) / labels.length;
+  let cx = x + 2;
+  labels.forEach((l, i) => {
+    const sw = fixed ? (w - 4)/labels.length : widths[i] + extra;
+    const sid = id + ':' + i, hv = disabled ? 0 : hov(sid);
+    if (!disabled) region(sid, cx, y, sw, h, { onDown: () => onPick(i), cursor: 'pointer', hint: `${l}` });
+    const sel = i === value;
+    if (sel) raised(cx, y + 2, sw, h - 4, 2, C.ink5);
+    const tc = disabled ? C.textDim : sel ? (col && col[i] ? col[i] : C.textHi) : mixHex(C.textMute, C.text, hv);
+    if (icons && icons[i]) { icon(icons[i], cx + sw/2 - measure(l,11)/2 - 4, y + h/2, tc, 0.8); text(l, cx + sw/2 + 8, y + h/2 + 0.5, { col: tc, align: 'center' }); }
+    else text(l, cx + sw/2, y + h/2 + 0.5, { col: tc, align: 'center', weight: sel ? 620 : 500 });
+    cx += sw;
+  });
+}
+function sectionTitle(label, x, y, right = null) {
+  text(label, x, y, { size: 11.5, weight: 620, col: C.textMute });
+  if (right) text(right, x + 1000, y, { col: C.textDim, align: 'right' });
+}
+function arcPath(cx, cy, r, a0, a1) { g.beginPath(); g.arc(cx, cy, r, a0, a1, a1 < a0); }
+const A0 = Math.PI*0.75, SWEEP = Math.PI*1.5;
+function knob(id, k, cx, cy, {size = 'small', col = C.text, label = null, bipolar = false, dim = false, live = null} = {}) {
+  const hv = hov(id), n = toNorm(k, P[k]);
+  const hero = size === 'hero';
+  const bodyR = hero ? 36 : 15, ringR = hero ? 50 : 20, ringW = hero ? 3 : 2;
+  const hd = paramDrag(k, hero ? 260 : 200);
+  region(id, cx - ringR - 4, cy - ringR - 4, ringR*2 + 8, ringR*2 + 8, hd);
+  g.save(); if (dim) g.globalAlpha = 0.38;
+  // ring track + value arc (from min, or from default for bipolar params)
+  arcPath(cx, cy, ringR, A0, A0 + SWEEP); g.strokeStyle = C.ink0; g.lineWidth = ringW + 2; g.lineCap = 'round'; g.stroke();
+  arcPath(cx, cy, ringR, A0, A0 + SWEEP); g.strokeStyle = C.ink6; g.lineWidth = ringW; g.stroke();
+  const n0 = bipolar ? toNorm(k, PARAMS[k].def) : 0;
+  if (Math.abs(n - n0) > 0.002) { arcPath(cx, cy, ringR, A0 + SWEEP*n0, A0 + SWEEP*n); g.strokeStyle = hv > 0.5 ? mixHex(col, '#FFFFFF', 0.25) : col; g.lineWidth = ringW; g.stroke(); }
+  if (bipolar) { const a = A0 + SWEEP*n0; line(cx + Math.cos(a)*(ringR-3), cy + Math.sin(a)*(ringR-3), cx + Math.cos(a)*(ringR+3), cy + Math.sin(a)*(ringR+3), C.textDim, 1); }
+  if (hero) { // precision scale: 21 ticks, majors every 25 %
+    for (let i = 0; i <= 20; i++) { const a = A0 + SWEEP*i/20, major = i % 5 === 0, r0 = ringR + 5, r1 = ringR + (major ? 10 : 7);
+      line(cx + Math.cos(a)*r0, cy + Math.sin(a)*r0, cx + Math.cos(a)*r1, cy + Math.sin(a)*r1, major ? C.textDim : C.ink7, major ? 1.25 : 1); }
+    if (live !== null) { // live duck: inner arc chases the current gain reduction
+      const ln = clamp(live, 0, 1); if (ln > 0.004) { arcPath(cx, cy, ringR - 6, A0, A0 + SWEEP*ln); g.strokeStyle = rgba(C.duck, 0.8); g.lineWidth = 1.5; g.lineCap = 'round'; g.stroke(); } }
+  }
+  // body image (static lighting) + vector pointer
+  const img = hero ? IMG.knobHero : IMG.knobSmall, half = hero ? 48 : 22;
+  g.drawImage(img, cx - half, cy - half, half*2, half*2);
+  const a = A0 + SWEEP*n, ca = Math.cos(a), sa = Math.sin(a);
+  if (hero) {
+    g.lineCap = 'round';
+    line(cx + ca*9, cy + sa*9, cx + ca*27, cy + sa*27, 'rgba(38,34,29,0.92)', 3.2);
+    line(cx + ca*9 + 0.7, cy + sa*9 + 0.9, cx + ca*27 + 0.7, cy + sa*27 + 0.9, 'rgba(255,255,255,0.28)', 0.9);
+  } else {
+    g.lineCap = 'round'; line(cx + ca*4, cy + sa*4, cx + ca*12.5, cy + sa*12.5, C.textHi, 2);
+  }
+  g.restore();
+  if (label !== null) {
+    text(label, cx, cy + ringR + 12, { col: dim ? C.textDim : C.textMute, align: 'center' });
+    valueText(id, k, cx, cy + ringR + 26, dim);
+  }
+}
+function valueText(id, k, cx, y, dim = false, {size = 11.5, font = FONT.sc, weight = 620, col} = {}) {
+  if (S.entry && S.entry.k === k) { drawEntry(cx, y, size); return; }
+  const s = fmt(k); const w = measure(s, size, font, weight);
+  const vid = id + ':v', hv = hov(vid);
+  region(vid, cx - w/2 - 4, y - 8, w + 8, 16, { onDown: () => openEntry(k), cursor: 'text', hint: `${NAMES[k]||k}: click to type a value` });
+  text(s, cx, y, { size, font, weight, col: dim ? C.textDim : (col || mixHex(C.text, C.textHi, hv)), align: 'center' });
+  if (hv > 0.05) line(cx - w/2, y + size/2 + 1.5, cx + w/2, y + size/2 + 1.5, rgba(C.textMute, 0.6*hv));
+}
+function drawEntry(cx, y, size) {
+  const E = S.entry, t = E.text || ' ', w = Math.max(56, measure(t, size, FONT.sc, 620) + 18);
+  region('entry', cx - w/2, y - 10, w, 20, { cursor: 'text' });
+  fillRR(cx - w/2, y - 10, w, 20, 3, C.ink0); strokeRR(cx - w/2 + 0.5, y - 9.5, w - 1, 19, 3, C.duck);
+  if (E.all) fillRR(cx - measure(t,size,FONT.sc,620)/2 - 2, y - 7, measure(t,size,FONT.sc,620) + 4, 14, 2, rgba(C.duck, 0.3));
+  text(t, cx, y, { size, weight: 620, col: C.textHi, align: 'center' });
+  if (!E.all && (performance.now() % 1000) < 560) line(cx + measure(t,size,FONT.sc,620)/2 + 1.5, y - 6, cx + measure(t,size,FONT.sc,620)/2 + 1.5, y + 6, C.duck, 1.2);
+}
+function valueField(id, k, x, y, w, h, label, {hint} = {}) { // label + draggable number in a recessed box
+  const hd = paramDrag(k, 200); const hv = hov(id);
+  region(id, x, y, w, h, hd);
+  well(x, y, w, h, 3);
+  if (hv > 0.01) strokeRR(x + 0.5, y + 0.5, w - 1, h - 1, 3, `rgba(255,248,235,${0.08*hv})`);
+  text(label, x + 8, y + h/2 + 0.5, { col: C.textMute });
+  if (S.entry && S.entry.k === k) { drawEntry(x + w - 30, y + h/2, 11.5); return; }
+  text(fmt(k), x + w - 8, y + h/2 + 0.5, { weight: 620, col: mixHex(C.text, C.textHi, hv), align: 'right' });
+}
+
+// =============================================================================================
+// 10. Regions
+// =============================================================================================
+const L = { header:[0,0,W,44], left:[0,44,244,588], center:[244,44,636,588], right:[880,44,200,588], footer:[0,632,W,28] };
+const E = { disp:[256,88,612,328], plot:[268,100,588,272], lab:[268,374,588,14], qs:[268,392,588,16] };
+const PX = E.plot[0], PY = E.plot[1], PW = E.plot[2], PH = E.plot[3];
+const X = p => PX + p*PW, Y = v => PY + (1 - v)*PH;
+const invX = x => clamp((x - PX)/PW, 0, 1), invY = y => clamp(1 - (y - PY)/PH, 0, 1);
+
+function drawChassis() {
+  // powder-coated graphite: faint top-lit gradient + device-pixel grain
+  const lg = g.createLinearGradient(0, 0, 0, H); lg.addColorStop(0, '#22211F'); lg.addColorStop(1, '#1B1A18');
+  g.fillStyle = lg; g.fillRect(0, 0, W, H);
+  g.save(); g.globalAlpha = 0.16; const pat = g.createPattern(IMG.grain, 'repeat');
+  pat.setTransform(new DOMMatrix().scale(1/(S.scale*DPR))); g.fillStyle = pat; g.fillRect(0, 0, W, H); g.restore();
+  // header rail
+  const hg = g.createLinearGradient(0, 0, 0, 44); hg.addColorStop(0, '#1A1A18'); hg.addColorStop(1, '#171715');
+  g.fillStyle = hg; g.fillRect(0, 0, W, 44);
+  groove(0, 44, W, 44);
+  groove(244, 46, 244, 632); groove(880, 46, 880, 632);
+  // footer rail
+  g.fillStyle = '#171715'; g.fillRect(0, 633, W, 27); groove(0, 632, W, 632);
+}
+
+// Header --------------------------------------------------------------------------------------
+function drawWordmark(x, baseline, size, col) {
+  const wm = ASSETS.wordmark; g.save(); g.translate(x, baseline); g.scale(size, size); g.beginPath();
+  for (const c of wm.contours) for (const cmd of c.cmds) {
+    if (cmd[0] === 'M') g.moveTo(cmd[1], cmd[2]); else if (cmd[0] === 'L') g.lineTo(cmd[1], cmd[2]);
+    else if (cmd[0] === 'Q') g.quadraticCurveTo(cmd[1], cmd[2], cmd[3], cmd[4]); else g.closePath(); }
+  g.fillStyle = col; g.fill('nonzero'); g.restore();
+}
+function drawHeader() {
+  drawWordmark(16 - 0.065*21, 27, 21, C.textHi);
+  const hv = hov('logo'); region('logo', 12, 8, 116, 30, { onDown: () => openMenu(16, 40, [{label:'Kickarse 1.0.0', dim:true}, {label:'Sidechain, drawn by hand.', dim:true}, null, {label:'Open user folder', act:()=>{}}, {label:'Online manual', act:()=>{}}]), cursor:'pointer', hint:'About Kickarse' });
+  // preset bar (recessed), centred over the editor column
+  const bx = 256, by = 8, bw = 460, bh = 28;
+  well(bx, by, bw, bh, 3);
+  iconButton('pBrowse', 'browse', bx + 2, by + 2, 30, bh - 4, { onClick: () => { S.overlay = S.overlay === 'presets' ? null : 'presets'; }, on: S.overlay === 'presets', hint: 'Browse presets' });
+  line(bx + 34.5, by + 6, bx + 34.5, by + bh - 6, C.ink5);
+  iconButton('pPrev', 'prev', bx + 36, by + 2, 24, bh - 4, { onClick: () => loadPreset((S.preset + PRESETS.length - 1) % PRESETS.length), hint: 'Previous preset' });
+  const pr = PRESETS[S.preset];
+  const nhv = hov('pName'); region('pName', bx + 62, by, 300, bh, { onDown: () => { S.overlay = 'presets'; }, cursor: 'pointer', hint: 'Click to browse · ↑/↓ or ‹ › to step' });
+  const catW = measure(pr[0] + '  /  ', 11.5);
+  const nameW = measure(pr[1], 12.5, FONT.sc, 620) + (S.dirty ? 9 : 0);
+  const sx = bx + 62 + 150 - (catW + nameW)/2;
+  text(pr[0] + '  /  ', sx, by + bh/2 + 0.5, { size: 11.5, col: C.textDim });
+  text(pr[1], sx + catW, by + bh/2 + 0.5, { size: 12.5, weight: 620, col: mixHex(C.text, C.textHi, 0.5 + nhv*0.5) });
+  if (S.dirty) text('*', sx + catW + nameW - 6, by + bh/2 - 1, { size: 13, weight: 620, col: C.duck });
+  iconButton('pNext', 'next', bx + 364, by + 2, 24, bh - 4, { onClick: () => loadPreset((S.preset + 1) % PRESETS.length), hint: 'Next preset' });
+  line(bx + 390.5, by + 6, bx + 390.5, by + bh - 6, C.ink5);
+  const fav = favPresets.has(pr[1]);
+  iconButton('pFav', fav ? 'starOn' : 'star', bx + 392, by + 2, 32, bh - 4, { on: fav, onClick: () => { fav ? favPresets.delete(pr[1]) : favPresets.add(pr[1]); }, hint: fav ? 'Remove from favourites' : 'Add to favourites' });
+  iconButton('pSave', 'save', bx + 426, by + 2, 32, bh - 4, { onClick: () => { S.dirty = false; S.savedFlash = 1; }, hint: 'Save preset (Ctrl+S)' });
+  if (S.savedFlash > 0) text('Saved', bx + bw + 10, by + bh/2, { col: rgba(C.duck, Math.min(1, S.savedFlash*2)) });
+  // undo / redo
+  iconButton('undo', 'undo', 736, 10, 28, 24, { onClick: undo, disabled: !S.undo.length, hint: 'Undo (Ctrl+Z)' });
+  iconButton('redo', 'redo', 766, 10, 28, 24, { onClick: redo, disabled: !S.redo.length, hint: 'Redo (Ctrl+Shift+Z)' });
+  // settings + bypass
+  iconButton('more', 'more', 986, 10, 28, 24, { onClick: () => openMenu(986, 38, settingsMenu(), { right: 1064 }), on: S.menu && S.menu.id === 'settings', hint: 'Settings: UI size, hints, folders' });
+  const byp = P.bypass > 0.5, bhv = hov('bypass');
+  region('bypass', 1020, 8, 48, 28, { onDown: () => { pushUndo(); P.bypass = byp ? 0 : 1; }, cursor: 'pointer', hint: byp ? 'Bypassed — click to engage' : 'Engaged — click to bypass' });
+  raised(1020, 8, 48, 28, 3, C.ink4, bhv);
+  lamp(1032, 22, byp ? 0 : 1, C.duck, 5);
+  icon('power', 1052, 22, byp ? C.textMute : C.textHi, 0.95);
+}
+function settingsMenu() {
+  return [ {label:'UI size', header:true}, ...[1,1.25,1.5,1.75,2].map(s => ({ label: `${Math.round(s*100)} %`, check: S.scale === s, act: () => setScale(s) })),
+    null, { label: 'Hint line', check: !S.noHints, act: () => { S.noHints = !S.noHints; } }, { label: 'Animate shape changes', check: true, act: () => {} },
+    null, { label: 'Open user folder…', act: () => {} }, { label: 'Rescan presets', act: () => {} } ];
+}
+function loadPreset(i) {
+  pushUndo(); S.preset = i; const pr = PRESETS[i];
+  for (const k in PARAMS) if (k !== 'bypass') P[k] = PARAMS[k].def;
+  Object.assign(P, pr[2]); S.dirty = false; S.undo.pop();
+  startMorph(new Envelope(SHAPES.Sidechain[i % SHAPES.Sidechain.length]));
+}
+
+// Left column: Trigger + Time ------------------------------------------------------------------
+function drawLeft() {
+  const x = 16, w = 212;
+  // Time first: the rate is the most-used control after Depth, so it takes the top-left slot, and the
+  // variable-height mode panel below ends in free space instead of leaving a hole mid-column.
+  sectionTitle('Time', x, 64);
+  segmented('timeMode', x + w - 88, 54, 88, 20, ['Note','ms'], P.timeMode, i => { pushUndo(); P.timeMode = i; }, { fixed: true });
+  if (!P.timeMode) rateStepper(x, 76, w, 38); else valueField('lenField', 'lengthMs', x, 76, w, 38, 'Length');
+  const cyc = cycleSec()*1000;
+  text(P.timeMode ? 'Free time: the grid divides one cycle.' : `${RATES[Math.round(P.rate)][0]} at ${B.bpm.toFixed(0)} bpm = ${cyc < 1000 ? Math.round(cyc) + ' ms' : (cyc/1000).toFixed(2) + ' s'}`, x, 126, { col: C.textDim });
+  segmented('playMode', x, 140, w, 26, ['Loop','One-shot'], P.playMode, i => { pushUndo(); P.playMode = i; }, { icons: ['loop','oneshot'], fixed: true });
+  groove(12, 182, 232, 182);
+  sectionTitle('Trigger', x, 200);
+  const tf = S.trigFlash; // red = sidechain / trigger, everywhere
+  lamp(x + w - 4, 200, tf > 0.02 ? tf : 0, C.kick, 5);
+  text('hits', x + w - 14, 200.5, { size: 10, col: C.textDim, align: 'right' });
+  region('trigLed', x + w - 40, 192, 40, 16, { hint: 'Trigger activity: flashes on every trigger (transport cycle, MIDI note or detected hit)' });
+  segmented('mode', x, 210, w, 26, MODES, P.mode, i => { pushUndo(); P.mode = i; }, {});
+  const py = 248;
+  if (P.mode === 0) panelSync(x, py, w);
+  else if (P.mode === 1) panelMidi(x, py, w);
+  else if (P.mode === 2) panelAudio(x, py, w);
+  else if (P.mode === 3) panelSpectral(x, py, w);
+  else panelRing(x, py, w);
+}
+function rateStepper(x, y, w, h) {
+  well(x, y, w, h, 3);
+  const step = d => { pushUndo(); P.rate = clamp(Math.round(P.rate) + d, 0, 17); };
+  iconButton('rPrev', 'prev', x + 2, y + 2, 32, h - 4, { onClick: () => step(-1), hint: 'Longer cycle' });
+  iconButton('rNext', 'next', x + w - 34, y + 2, 32, h - 4, { onClick: () => step(1), hint: 'Shorter cycle' });
+  const hv = hov('rVal');
+  region('rVal', x + 36, y, w - 72, h, { onDown: () => { S.menu = { id: 'rate', x: x, y: y + h + 4 }; }, onWheel: d => step(-d), cursor: 'pointer', hint: 'Rate: click for the note-value grid · wheel to step' });
+  const lab = RATES[Math.round(P.rate)][0];
+  text(lab, x + w/2, y + h/2 + 1, { size: 19, font: FONT.exp, weight: 600, col: mixHex(C.text, C.textHi, 0.6 + hv*0.4), align: 'center' });
+  icon('caret', x + w/2 + measure(lab, 19, FONT.exp, 600)/2 + 10, y + h/2 + 1, hv > 0.3 ? C.textMute : C.textDim, 0.9);
+}
+function panelSync(x, y, w) {
+  text('Locked to the host transport.', x, y + 6, { col: C.textMute });
+  lamp(x + 4, y + 26, B.playing ? 1 : 0, C.duck, 5);
+  text(B.playing ? 'Playing' : 'Stopped', x + 13, y + 26.5, { weight: 620, col: B.playing ? C.text : C.textMute });
+  text(`${B.bpm.toFixed(1)} bpm  ·  4/4`, x + w, y + 26.5, { col: C.textDim, align: 'right' });
+  // One bar of host time with the cycle tiled across it: makes the Rate tangible ("1/4 = four ducks per bar")
+  text('One bar', x, y + 52, { col: C.textMute });
+  const cyc = P.timeMode ? cycleSec()*B.bpm/60 : cycleBeats(), reps = 4 / cyc; // cycle length in beats (free time converts ms at the host tempo)
+  text(reps >= 1 ? `${+reps.toFixed(2)} cycle${reps === 1 ? '' : 's'}` : `${+(1/reps).toFixed(2)} bars per cycle`, x + w, y + 52, { col: C.textDim, align: 'right' });
+  const bx = x, by = y + 62, bw = w, bh = 70; well(bx, by, bw, bh, 3);
+  const ix = bx + 6, iw = bw - 12, iy = by + 8, ih = bh - 24;
+  for (let b = 0; b <= 4; b++) { const lx = Math.round(ix + iw*b/4) + .5; line(lx, iy, lx, iy + ih, b % 4 === 0 ? 'rgba(255,248,235,0.10)' : 'rgba(255,248,235,0.05)');
+    if (b < 4) text(String(b + 1), lx + 3, by + bh - 8, { size: 9.5, col: C.textDim }); }
+  g.save(); g.beginPath(); g.rect(ix, iy - 2, iw, ih + 4); g.clip();
+  const env = S.envA, map = phaseMap(), N = 180;
+  const ptsY = i => { const barPos = i/N*4 / cyc; const p = barPos - Math.floor(barPos); return iy + (1 - env.evaluate(map.toNode(p)))*ih; };
+  g.beginPath(); for (let i = 0; i <= N; i++) { const px = ix + iw*i/N; i ? g.lineTo(px, ptsY(i)) : g.moveTo(px, ptsY(i)); }
+  g.lineTo(ix + iw, iy + ih); g.lineTo(ix, iy + ih); g.closePath(); g.fillStyle = rgba(C.duck, 0.08); g.fill();
+  g.beginPath(); for (let i = 0; i <= N; i++) { const px = ix + iw*i/N; i ? g.lineTo(px, ptsY(i)) : g.moveTo(px, ptsY(i)); }
+  g.strokeStyle = C.duck; g.lineWidth = 1.25; g.lineJoin = 'round'; g.stroke();
+  const barPh = S.freeze !== null ? (S.freeze * cyc / 4) % 1 : ((simT * B.bpm / 60) / 4) % 1;
+  if (B.playing) line(Math.round(ix + iw*barPh) + .5, iy - 2, Math.round(ix + iw*barPh) + .5, iy + ih + 2, 'rgba(245,240,230,0.55)');
+  g.restore();
+  text('Rate, under Time, sets how many fit in a bar.', x, y + 150, { col: C.textDim });
+}
+function panelMidi(x, y, w) {
+  text('Note', x, y + 8, { col: C.textMute });
+  const nv = Math.round(P.midiNote);
+  well(x, y + 18, w - 70, 30, 3);
+  iconButton('nPrev', 'prev', x + 2, y + 20, 24, 26, { onClick: () => { pushUndo(); P.midiNote = clamp(nv - 1, -1, 127); }, hint: 'Lower note' });
+  iconButton('nNext', 'next', x + w - 96, y + 20, 24, 26, { onClick: () => { pushUndo(); P.midiNote = clamp(nv + 1, -1, 127); }, hint: 'Higher note' });
+  region('nVal', x + 28, y + 18, w - 126, 30, { onWheel: d => { P.midiNote = clamp(nv + d, -1, 127); }, onDbl: () => { P.midiNote = -1; }, cursor: 'ns-resize', hint: 'Trigger note: wheel to step · double-click = any note' });
+  text(fmt('midiNote'), x + (w - 70)/2, y + 33.5, { size: 12.5, weight: 620, col: C.textHi, align: 'center' });
+  lampButton('learn', 'Learn', x + w - 62, y + 18, 62, 30, S.learn, () => { S.learn = !S.learn; }, { hint: 'Learn: the next incoming note becomes the trigger note' });
+  // two-octave keyboard around the trigger note; lit = triggers, red flash = last note received
+  const base = nv < 0 ? 36 : Math.floor(nv/12)*12, kx = x, ky = y + 58, kw = w, kh = 44;
+  const whites = [0,2,4,5,7,9,11], ww = kw / 14;
+  well(kx, ky, kw, kh, 3);
+  for (let o = 0; o < 2; o++) whites.forEach((st, j) => { const note = base + o*12 + st, wx = kx + (o*7 + j)*ww, id = 'key' + note, hv = hov(id);
+    const on = nv < 0 || nv === note, last = B.lastNote === note && S.midiFlash > 0.02;
+    region(id, wx, ky, ww, kh, { onDown: () => { pushUndo(); P.midiNote = note; }, cursor: 'pointer', hint: `${noteName(note)} (${note}) — click to trigger on this note` });
+    fillRR(wx + 1, ky + 2, ww - 2, kh - 4, 2, last ? mixHex(nv < 0 ? '#7C7870' : '#57544E', C.kick, S.midiFlash) : on ? (nv < 0 ? '#7C7870' : C.duck) : mixHex('#4E4B46', '#6A665F', hv));
+    if (st === 0) text(noteName(note), wx + ww/2, ky + kh - 9, { size: 9, weight: 620, col: on && nv >= 0 ? C.ink1 : C.ink3, align: 'center' }); });
+  for (let o = 0; o < 2; o++) [1,3,6,8,10].forEach(st => { const note = base + o*12 + st, pos = { 1: 1, 3: 2, 6: 4, 8: 5, 10: 6 }[st], bx = kx + (o*7 + pos)*ww - ww*0.32, id = 'key' + note, hv = hov(id);
+    const on = nv === note, last = B.lastNote === note && S.midiFlash > 0.02;
+    region(id, bx, ky, ww*0.64, kh*0.58, { onDown: () => { pushUndo(); P.midiNote = note; }, cursor: 'pointer', hint: `${noteName(note)} (${note})` });
+    fillRR(bx, ky + 2, ww*0.64, kh*0.58, 1.5, last ? C.kick : on ? C.duck : mixHex(C.ink1, C.ink4, hv)); });
+  text(nv < 0 ? 'Every note triggers. Pick a key to filter.' : `Only ${noteName(nv)} triggers.`, x, y + 116, { col: C.textDim });
+  knob('velKnob', 'velocity', x + 26, y + 164, { label: 'Velocity' });
+  text('Note velocity scales', x + 62, y + 156, { col: C.textDim }); text('the depth of each duck.', x + 62, y + 171, { col: C.textDim });
+  lamp(x + 4, y + 230, S.midiFlash > 0.02 ? S.midiFlash : 0, C.kick, 5);
+  text(`Last note  ${noteName(B.lastNote)} · ${B.lastNote} · vel ${B.lastVel}`, x + 13, y + 230.5, { col: C.textMute });
+}
+function thresholdMeter(id, x, y, w, h, compact = false) {
+  // sidechain peak meter with a draggable threshold handle (dB scale -60..0)
+  well(x, y, w, h, 3);
+  const ix = x + 6, iw = w - 12, db2x = db => ix + iw * (db + 60)/60;
+  const my = y + (compact ? h/2 - 3 : h - 16), mh = 6;
+  fillRR(ix, my, iw, mh, 1, C.ink0);
+  const pk = clamp(B.scPeakDb, -60, 0);
+  const lg = g.createLinearGradient(ix, 0, ix + iw, 0); lg.addColorStop(0, rgba(C.kick, 0.35)); lg.addColorStop(1, C.kick);
+  g.fillStyle = lg; g.fillRect(ix, my, db2x(pk) - ix, mh);
+  if (!compact) for (const db of [-48,-36,-24,-12,0]) { line(db2x(db), my + mh + 2, db2x(db), my + mh + 5, C.ink7); text(db === 0 ? '0' : String(db).replace('-','−'), db2x(db), my + mh + 11, { size: 9.5, col: C.textDim, align: db === 0 ? 'right' : 'center' }); }
+  // threshold handle
+  const tx = db2x(P.threshold), hv = hov(id);
+  region(id, x, y, w, h, { onDown: (mx) => { pushUndo(); setParam('threshold', (clamp(mx, ix, ix+iw) - ix)/iw*60 - 60); },
+    onDrag: (mx, my2, dx, dy, m) => setParam('threshold', P.threshold + dx * (m.shift ? 0.1 : 1) * 60/iw), onDbl: () => { P.threshold = -24; },
+    onWheel: (d, m) => setParam('threshold', P.threshold + d*(m.shift?0.1:1)), cursor: 'ew-resize', hint: `Threshold ${fmt('threshold')} — the kick must cross this line to trigger` });
+  g.fillStyle = 'rgba(0,0,0,0.45)'; g.fillRect(tx, my, ix + iw - tx, mh); // above-threshold region reads as "live"
+  line(tx, y + 4, tx, y + h - (compact ? 4 : 10), hv > 0.3 ? C.textHi : C.text, 1.5);
+  g.beginPath(); g.moveTo(tx - 4, y + 3); g.lineTo(tx + 4, y + 3); g.lineTo(tx, y + 8); g.closePath(); g.fillStyle = hv > 0.3 ? C.textHi : C.text; g.fill();
+  if (S.trigFlash > 0.05) fillRR(ix, my, iw, mh, 1, rgba(C.kick, 0.25*S.trigFlash));
+}
+function filterGraph(id, x, y, w, h) {
+  const on = P.trigFilter > 0.5;
+  well(x, y, w, h, 3);
+  const f2x = f => x + 6 + (w - 12) * Math.log(f/20)/Math.log(1000);
+  const x2f = px => 20 * Math.pow(1000, clamp((px - x - 6)/(w - 12), 0, 1));
+  g.save(); rr(x, y, w, h, 3); g.clip();
+  for (const f of [100, 1000, 10000]) { line(f2x(f), y + 4, f2x(f), y + h - 4, 'rgba(255,248,235,0.05)'); text(f >= 1000 ? f/1000 + 'k' : String(f), f2x(f) + 3, y + h - 8, { size: 9.5, col: C.textDim }); }
+  // band-pass response (LR-ish magnitude), top = pass
+  g.beginPath(); const top = y + 10, bot = y + h - 4;
+  for (let px = x; px <= x + w; px += 2) { const f = x2f(px);
+    const hp = 1/Math.sqrt(1 + Math.pow(P.trigLowCut/f, 4)), lp = 1/Math.sqrt(1 + Math.pow(f/P.trigHighCut, 4));
+    const m = on ? hp*lp : 1; const yy = lerp(bot, top, Math.pow(m, 0.5)); px === x ? g.moveTo(px, yy) : g.lineTo(px, yy); }
+  g.lineTo(x + w, bot); g.lineTo(x, bot); g.closePath();
+  g.fillStyle = rgba(C.kick, on ? 0.13 : 0.04); g.fill();
+  g.beginPath(); for (let px = x; px <= x + w; px += 2) { const f = x2f(px); const hp = 1/Math.sqrt(1 + Math.pow(P.trigLowCut/f, 4)), lp = 1/Math.sqrt(1 + Math.pow(f/P.trigHighCut, 4));
+    const m = on ? hp*lp : 1; const yy = lerp(bot, top, Math.pow(m, 0.5)); px === x ? g.moveTo(px, yy) : g.lineTo(px, yy); }
+  g.strokeStyle = on ? C.kick : C.ink7; g.lineWidth = 1.5; g.stroke();
+  g.restore();
+  for (const [k, lab] of [['trigLowCut','Low cut'],['trigHighCut','High cut']]) {
+    const hx = f2x(P[k]), hid = id + k, hv = hov(hid);
+    region(hid, hx - 7, y, 14, h, { onDown: () => { pushUndo(); P.trigFilter = 1; }, onDrag: (mx) => setParam(k, x2f(mx)), onDbl: () => { P[k] = PARAMS[k].def; }, cursor: 'ew-resize', hint: `${NAMES[k]} ${fmt(k)} — detection path only` });
+    fillRR(hx - 3, y + 5, 6, 10, 1.5, on ? (hv > 0.3 ? C.textHi : C.text) : C.ink7);
+    if (hv > 0.3 || ui.active && ui.active.id === hid) text(fmt(k), hx + (k === 'trigLowCut' ? 6 : -6), y + 10.5, { size: 10, col: C.textHi, align: k === 'trigLowCut' ? 'left' : 'right' });
+  }
+}
+function panelAudio(x, y, w) {
+  text('Threshold', x, y + 6, { col: C.textMute }); valueText('thrV', 'threshold', x + w - 24, y + 6);
+  thresholdMeter('thr', x, y + 16, w, 44);
+  knob('holdKnob', 'retrigMs', x + 26, y + 100, { label: 'Hold' });
+  text('Ignores new hits for', x + 62, y + 92, { col: C.textDim }); text('this long after a trigger.', x + 62, y + 107, { col: C.textDim });
+  text('Detection filter', x, y + 169, { col: C.textMute });
+  lampButton('tFilt', 'Filter', x + w - 128, y + 158, 56, 22, P.trigFilter > 0.5, () => { pushUndo(); P.trigFilter = P.trigFilter > 0.5 ? 0 : 1; }, { col: C.kick, hint: 'Filter the sidechain before detection (not the audio you hear)' });
+  lampButton('tListen', 'Listen', x + w - 68, y + 158, 68, 22, P.trigListen > 0.5, () => { pushUndo(); P.trigListen = P.trigListen > 0.5 ? 0 : 1; }, { col: C.kick, icn: 'phones', hint: 'Listen to the filtered detection signal' });
+  filterGraph('tfg', x, y + 188, w, 64);
+  text(`${fmt('trigLowCut')} – ${fmt('trigHighCut')}`, x, y + 268, { col: C.textDim });
+  text('isolates the kick in a full drum bus', x + w, y + 268, { col: C.textDim, align: 'right', size: 10 });
+}
+function sourceRow(x, y, w) {
+  text('Driven by', x, y + 6, { col: C.textMute });
+  segmented('trigSrc', x, y + 16, w, 24, TRIG_SOURCES, P.trigSource, i => { pushUndo(); P.trigSource = i; });
+  if (P.trigSource === 0) { thresholdMeter('thrC', x, y + 46, w - 64, 22, true); valueText('thrCV', 'threshold', x + w - 30, y + 57); return 76; }
+  return 48;
+}
+function spectrumDisplay(x, y, w, h) {
+  // Primary: the cut per band, hanging from the top in duck yellow (what is carved out of the main
+  // signal). Secondary: the sidechain spectrum as a red profile rising from the bottom (what causes it).
+  well(x, y, w, h, 3);
+  const n = SPEC, gap = 2, bw = (w - 12 - gap*(n-1))/n, top = y + 6, bot = y + h - 16;
+  const range = Math.max(3, P.specRange);
+  g.save(); rr(x, y, w, h, 3); g.clip();
+  // sidechain profile
+  const scY = i => bot - clamp((B.specSc[i] + 60)/60, 0, 1)*(bot - top);
+  const cxOf = i => x + 6 + i*(bw + gap) + bw/2;
+  g.beginPath(); g.moveTo(x + 6, bot); for (let i = 0; i < n; i++) g.lineTo(cxOf(i), scY(i)); g.lineTo(x + w - 6, bot); g.closePath(); g.fillStyle = rgba(C.kick, 0.10); g.fill();
+  g.beginPath(); for (let i = 0; i < n; i++) i ? g.lineTo(cxOf(i), scY(i)) : g.moveTo(cxOf(i), scY(i)); g.strokeStyle = rgba(C.kick, 0.7); g.lineWidth = 1.25; g.lineJoin = 'round'; g.stroke();
+  // cut bars (relative to Range: a full bar = the maximum cut)
+  for (let i = 0; i < n; i++) {
+    const bx = x + 6 + i*(bw + gap), cut = clamp(-B.specCut[i]/range, 0, 1), ch = cut*(bot - top);
+    fillRR(bx, top, bw, 2, 0, 'rgba(255,248,235,0.08)');
+    if (ch > 0.5) { g.fillStyle = C.duck; g.fillRect(bx, top, bw, ch); }
+  }
+  g.restore();
+  line(x + 6, bot + .5, x + w - 6, bot + .5, 'rgba(255,248,235,0.06)');
+  for (const [f, lab] of [[100,'100'],[1000,'1k'],[10000,'10k']]) { const fx = x + 6 + (w-12)*Math.log(f/30)/Math.log(16000/30); text(lab, fx, y + h - 7, { size: 9.5, col: C.textDim, align: 'center' }); }
+}
+function panelSpectral(x, y, w) {
+  let yy = y + sourceRow(x, y, w) + 8;
+  text('Cut per band', x, yy + 4, { col: C.textMute });
+  text(`up to −${Math.round(P.specRange)} dB`, x + w, yy + 4, { col: rgba(C.duck, 0.85), align: 'right' });
+  region('specDisp', x, yy + 12, w, 84, { hint: 'Yellow bars: cut per band (full bar = Range). Red line: sidechain spectrum that causes it.' });
+  spectrumDisplay(x, yy + 12, w, 84);
+  yy += 108;
+  const ks = [['sAtk','specAttack','Attack'],['sRel','specRelease','Release'],['sRng','specRange','Range'],['sSens','specSens','Sens']];
+  ks.forEach(([id,k,lab], i) => knob(id, k, x + 26 + i*53.3, yy + 28, { label: lab }));
+  yy += 90;
+  text('Envelope shapes', x, yy + 12, { col: C.textMute });
+  segmented('specTgt', x + 94, yy, w - 94, 24, ['Depth','Volume'], P.specTarget, i => { pushUndo(); P.specTarget = i; }, { fixed: true });
+}
+function panelRing(x, y, w) {
+  let yy = y + sourceRow(x, y, w) + 12;
+  text('The sidechain waveform multiplies the', x, yy, { col: C.textDim }); text('main signal: the kick carves the bass', x, yy + 15, { col: C.textDim }); text('at audio rate instead of pumping it.', x, yy + 30, { col: C.textDim });
+  yy += 56;
+  knob('rAtk', 'ringAttack', x + 50, yy + 30, { label: 'Attack' });
+  knob('rRel', 'ringRelease', x + w - 50, yy + 30, { label: 'Release' });
+  text('faster', x + 50, yy + 96, { size: 10, col: C.textDim, align: 'center' }); text('smoother', x + w - 50, yy + 96, { size: 10, col: C.textDim, align: 'center' });
+}
+
+// Centre: editor toolbar ------------------------------------------------------------------------
+function drawToolbar() {
+  const y = 52, h = 28;
+  // tools
+  well(256, y, 88, h, 3);
+  ['select','line','pencil'].forEach((nm, i) => {
+    const id = 'tool' + i, x = 258 + i*28, hv = hov(id), sel = S.tool === i;
+    region(id, x, y + 2, 28, h - 4, { onDown: () => { S.tool = i; }, cursor: 'pointer', hint: ['Select & edit: drag nodes, drag a segment to bend, double-click to add/remove', 'Line: drag to draw straight segments', 'Pencil: draw freehand, simplified to nodes'][i] });
+    if (sel) raised(x, y + 2, 28, h - 4, 2, C.ink5);
+    icon(nm, x + 14, y + h/2, sel ? C.textHi : mixHex(C.textMute, C.text, hv));
+  });
+  // grid dropdown
+  const gx = 352, ghv = hov('grid');
+  region('grid', gx, y, 88, h, { onDown: () => { S.menu = { id: 'grid', x: gx, y: y + h + 4 }; }, onWheel: d => { P.grid = clamp(Math.round(P.grid) - d, 0, 7); }, cursor: 'pointer', hint: 'Grid resolution · wheel to step' });
+  well(gx, y, 88, h, 3); text('Grid', gx + 8, y + h/2 + 0.5, { col: C.textMute });
+  text(GRIDS[Math.round(P.grid)][0], gx + 70, y + h/2 + 0.5, { weight: 620, col: mixHex(C.text, C.textHi, ghv), align: 'right' });
+  icon('caret', gx + 79, y + h/2 + 0.5, C.textMute, 0.85);
+  lampButton('snap', 'Snap', 446, y, 62, h, S.snap, () => { S.snap = !S.snap; }, { hint: 'Snap nodes to the grid (hold Ctrl while dragging to invert)' });
+  valueField('swing', 'swing', 514, y, 86, h, 'Swing');
+  valueField('smooth', 'smooth', 606, y, 96, h, 'Smooth');
+  // waveform layer toggles: In / Side / Out
+  const wx = 712; text('Show', wx, y + h/2 + 0.5, { col: C.textDim });
+  const tog = [['wIn','In',S.showIn,()=>S.showIn=!S.showIn,C.textHi,'Main input before processing'],['wSc','Side',S.showSc,()=>S.showSc=!S.showSc,C.kick,'Sidechain (after the detection filter)'],['wOut','Out',S.showOut,()=>S.showOut=!S.showOut,C.textHi,'Output after ducking']];
+  let tx = wx + 32;
+  tog.forEach(([id, lab, on, fn, col, hint]) => { const tw = measure(lab) + 28; lampButton(id, lab, tx, y, tw, h, on, fn, { col, hint }); tx += tw + 4; });
+}
+
+// Centre: the envelope editor -------------------------------------------------------------------
+const ed = { drag: null, hoverNode: -1, hoverSeg: -1, hoverHandle: -1, marquee: null, pencil: null, lineTool: null, readout: null };
+function nodeScreen(env, map, i) { const o = env.n[i]; return [X(map.toTimeline(o.x)), Y(o.y)]; }
+function evalTimeline(env, map, p) { return env.evaluate(map.toNode(p)); }
+function drawEnvelopeCurve(env, map, col, {width = 2, fill = true, alpha = 1, effDepth = null} = {}) {
+  const pts = []; const N = PW;
+  for (let i = 0; i <= N; i++) { const p = i/N; pts.push([X(p), Y(evalTimeline(env, map, p))]); }
+  // add exact node positions for crisp vertical steps
+  if (fill) {
+    g.beginPath(); pts.forEach(([x,y],i) => i ? g.lineTo(x,y) : g.moveTo(x,y)); g.lineTo(X(1), Y(0)); g.lineTo(X(0), Y(0)); g.closePath();
+    const lg = g.createLinearGradient(0, PY, 0, PY + PH); lg.addColorStop(0, rgba(col, 0.085*alpha)); lg.addColorStop(1, rgba(col, 0));
+    g.fillStyle = lg; g.fill();
+  }
+  if (effDepth !== null && effDepth < 0.995) { // what is actually applied at this Depth
+    g.beginPath(); pts.forEach(([x,y],i) => { const v = 1 - effDepth*(1 - invY(y)); i ? g.lineTo(x, Y(v)) : g.moveTo(x, Y(v)); });
+    g.setLineDash([3, 3]); g.strokeStyle = rgba(col, 0.55); g.lineWidth = 1; g.stroke(); g.setLineDash([]);
+  }
+  g.beginPath(); pts.forEach(([x,y],i) => i ? g.lineTo(x,y) : g.moveTo(x,y));
+  g.strokeStyle = rgba(col, alpha); g.lineWidth = width; g.lineJoin = 'round'; g.lineCap = 'round'; g.stroke();
+}
+function drawWaves() {
+  // Magnitude view on the gain axis: 0 at the bottom, full scale at the top. Out = In x gain, so the
+  // output silhouette visibly takes the shape of the curve; the gap between In (outline) and Out
+  // (fill) is what the duck removed. Side (the kick) is red, like every sidechain cue in the UI.
+  const n = BINS;
+  const path = arr => { g.beginPath(); g.moveTo(X(0), Y(0));
+    for (let i = 0; i <= n; i++) g.lineTo(X(i/n), Y(Math.min(1, arr[Math.min(i, n - 1)]))); g.lineTo(X(1), Y(0)); g.closePath(); };
+  const edge = arr => { g.beginPath(); for (let i = 0; i <= n; i++) { const x = X(i/n), y = Y(Math.min(1, arr[Math.min(i, n - 1)])); i ? g.lineTo(x, y) : g.moveTo(x, y); } };
+  const outArr = P.delta > 0.5 ? B.mainWave.map((v, i) => Math.max(0, v - B.outWave[i])) : B.outWave; // Delta: show what is removed
+  if (S.showOut) { path(outArr); g.fillStyle = P.delta > 0.5 ? rgba(C.duck, 0.10) : 'rgba(245,240,230,0.075)'; g.fill(); }
+  if (S.showIn) { if (S.showOut) { edge(B.mainWave); g.strokeStyle = 'rgba(245,240,230,0.20)'; g.lineWidth = 1; g.stroke(); }
+                  else { path(B.mainWave); g.fillStyle = 'rgba(245,240,230,0.07)'; g.fill(); } }
+  if (S.showSc) { path(B.extWave); g.fillStyle = rgba(C.kick, 0.10); g.fill(); edge(B.extWave); g.strokeStyle = rgba(C.kick, 0.55); g.lineWidth = 1; g.stroke(); }
+}
+function drawGrid(map) {
+  const div = map.d, cb = P.timeMode ? 0 : cycleBeats(), lines = !S.drawLabels;
+  // horizontal: unity, -6 dB, 50 %, 25 %
+  if (lines) for (const v of [0.25, 0.5, 0.75]) line(PX, Y(v) + 0.5, PX + PW, Y(v) + 0.5, 'rgba(255,248,235,0.035)');
+  if (lines) line(PX, Y(1) + 0.5, PX + PW, Y(1) + 0.5, 'rgba(255,248,235,0.07)'); if (lines) line(PX, Y(0) + 0.5, PX + PW, Y(0) + 0.5, 'rgba(255,248,235,0.07)');
+  // vertical grid in timeline space (swing-warped, rotated)
+  const beatsPerCell = GRIDS[Math.round(P.grid)][1];
+  const every = Math.max(1, Math.ceil(div / 16)); // label decimation
+  for (let k = 0; k < Math.round(div); k++) {
+    const q = k / div, p = map.toTimeline(q), x = Math.round(X(p)) + 0.5;
+    const onBeat = !P.timeMode && Math.abs((k*beatsPerCell) - Math.round(k*beatsPerCell)) < 1e-6;
+    if (lines) line(x, PY, x, PY + PH, k === 0 ? 'rgba(255,248,235,0.10)' : onBeat ? 'rgba(255,248,235,0.075)' : 'rgba(255,248,235,0.035)');
+    if (k % every === 0 && k > 0 && S.drawLabels) {
+      const lab = P.timeMode ? `${Math.round(q*P.lengthMs)} ms` : gridLabel(k, beatsPerCell, cb);
+      text(lab, x, E.lab[1] + 7, { size: 10, col: onBeat ? C.textMute : C.textDim, align: 'center' });
+    }
+  }
+}
+function gridLabel(k, cell, cycleBeatsVal) {
+  const beats = k * cell; // quarter notes from cycle start
+  const g2 = GRIDS[Math.round(P.grid)][0];
+  if (Math.abs(beats - Math.round(beats)) < 1e-6 && cycleBeatsVal > 1) { const b = Math.round(beats); return `${Math.floor(b/4)+1}.${b%4+1}`; }
+  const den = parseInt(g2.split('/')[1]); return `${k}/${den}${g2.endsWith('T')?'T':''}`;
+}
+function drawEditor() {
+  const [dx, dy, dw, dh] = E.disp;
+  well(dx, dy, dw, dh, 3);
+  const bgg = g.createLinearGradient(0, dy, 0, dy + dh); bgg.addColorStop(0, 'rgba(255,248,235,0.012)'); bgg.addColorStop(1, 'rgba(0,0,0,0.18)');
+  g.fillStyle = bgg; g.fillRect(dx + 1, dy + 6, dw - 2, dh - 7);
+  const map = phaseMap(), env = curEnv(), other = (P.multi && !P.envLink) ? (S.editBand === 1 ? S.envA : S.envB) : null;
+  const bandCol = (P.multi && !P.envLink && S.editBand === 1) ? C.high : C.duck, otherCol = S.editBand === 1 ? C.duck : C.high;
+  g.save(); g.beginPath(); g.rect(PX - 8, PY - 8, PW + 16, PH + 16); g.clip();
+  drawGrid(map);
+  drawWaves();
+  // recording sweep
+  if (S.rec === 2) { const rx = X(S.recProgress); g.fillStyle = rgba(C.kick, 0.07); g.fillRect(PX, PY, rx - PX, PH); line(rx, PY, rx, PY + PH, rgba(C.kick, 0.8), 1.5); }
+  if (other) drawEnvelopeCurve(other, map, otherCol, { width: 1.25, fill: false, alpha: 0.42 });
+  // shape preview from the library hover (ghost, nothing applied yet)
+  if (S.libHover >= 0) { const shp = SHAPES[S.libTab][S.libHover]; if (shp) { g.setLineDash([4, 3]); drawEnvelopeCurve(new Envelope(shp), map, C.textHi, { width: 1.25, fill: false, alpha: 0.55 }); g.setLineDash([]); } }
+  let drawEnv = env;
+  if (S.morph) { const m = S.morph; const t = easeOut(m.t); const pts = [];
+    for (let i = 0; i <= 96; i++) { const q = i/96; pts.push({ x: q, y: lerp(m.from.evaluate(q), m.to.evaluate(q), t) }); }
+    drawEnv = new Envelope(pts); }
+  if (P.bypass > 0.5) g.globalAlpha = 0.5;
+  drawEnvelopeCurve(drawEnv, map, bandCol, { effDepth: P.depth/100 * (P.multi ? (S.editBand ? P.hiMix : P.loMix)/100 : 1) });
+  // trigger flash at the cycle start
+  if (S.trigFlash > 0.02 && P.mode !== 0) { g.fillStyle = rgba(C.kick, 0.5*S.trigFlash); g.fillRect(X(map.toTimeline(0)) - 1, PY, 2, PH); }
+  // playhead + riding dot
+  if (B.playing || P.mode !== 0) {
+    const ph = B.phase, x = X(ph), y = Y(P.editBand && P.multi && !P.envLink ? B.valueB : B.valueA);
+    const tr = g.createLinearGradient(x - 18, 0, x, 0); tr.addColorStop(0, 'rgba(245,240,230,0)'); tr.addColorStop(1, `rgba(245,240,230,${B.active ? 0.045 : 0.015})`);
+    g.fillStyle = tr; g.fillRect(x - 18, PY, 18, PH);
+    line(Math.round(x) + 0.5, PY, Math.round(x) + 0.5, PY + PH, `rgba(245,240,230,${B.active ? 0.5 : 0.18})`, 1);
+    if (!S.morph) { g.beginPath(); g.arc(x, Y(evalTimeline(env, map, ph)), 3.5, 0, Math.PI*2); g.fillStyle = C.textHi; g.fill(); g.strokeStyle = C.ink1; g.lineWidth = 2; g.stroke(); }
+  }
+  g.globalAlpha = 1;
+  g.restore();
+  S.drawLabels = true; g.save(); g.beginPath(); g.rect(E.lab[0] - 20, E.lab[1], E.lab[2] + 40, E.lab[3]); g.clip(); drawGrid(map); g.restore(); S.drawLabels = false;
+  text(P.mode === 3 ? (P.specTarget ? 'Gain after spectral' : 'Spectral depth') : P.mode === 4 ? 'Ring depth' : 'Gain', PX, E.lab[1] + 7, { size: 10, col: C.textDim });
+  if (!S.morph) drawNodes(env, map, bandCol);
+  drawToolPreviews(map, bandCol);
+  // corner status: loop/one-shot glyph, waiting state
+  icon(P.playMode ? 'oneshot' : 'loop', PX + PW - 10, PY + 10, C.textDim, 0.8);
+  if (!B.active && P.mode !== 0) text(P.playMode ? 'Held — waiting for the next trigger' : 'Waiting for a trigger', PX + PW - 24, PY + 10.5, { col: C.textDim, align: 'right' });
+  if (S.rec === 1) { const a = 0.5 + 0.5*Math.sin(performance.now()/220); strokeRR(dx + 1.5, dy + 1.5, dw - 3, dh - 3, 3, rgba(C.kick, 0.35 + 0.4*a), 1.5);
+    text('Armed — capture starts on the next ' + (P.mode === 0 ? 'cycle' : 'trigger'), PX + 8, PY + 10.5, { col: C.kick }); }
+  if (S.rec === 2) text(`Capturing sidechain… ${Math.round(S.recProgress*100)} %`, PX + 8, PY + 10.5, { col: C.kick });
+  if (S.capturedFlash > 0) text('Captured from the sidechain — saved to User shapes', PX + 8, PY + 10.5, { col: rgba(C.textHi, Math.min(1, S.capturedFlash*2)) });
+  // label strip + quick shift lane
+  drawQuickShift(env, map, bandCol);
+  if (ed.readout) { const r = ed.readout; const w = measure(r.s, 10.5) + 12; let rx = clamp(r.x + 10, PX, PX + PW - w), ry = clamp(r.y - 26, PY, PY + PH - 18);
+    fillRR(rx, ry, w, 18, 3, 'rgba(12,12,11,0.92)'); strokeRR(rx + .5, ry + .5, w - 1, 17, 3, C.ink6); text(r.s, rx + 6, ry + 9.5, { size: 10.5, weight: 620, col: C.textHi }); }
+  editorRegion(env, map);
+}
+const easeOut = t => 1 - Math.pow(1 - clamp(t,0,1), 3);
+function drawNodes(env, map, col) {
+  const n = env.n;
+  // tension handles for hovered / selected segments
+  for (let i = 0; i < n.length - 1; i++) {
+    const a = n[i], b = n[i+1]; if (b.x - a.x < 0.01) continue;
+    const show = ed.hoverSeg === i || ed.hoverHandle === i || S.sel.has(i) || S.sel.has(i+1) || (ed.drag && ed.drag.seg === i);
+    if (!show) continue;
+    const qm = (a.x + b.x)/2, hx = X(map.toTimeline(qm)), hy = Y(env.evaluate(qm));
+    const hot = ed.hoverHandle === i || (ed.drag && ed.drag.seg === i);
+    // tension handles are solid dots (nodes are rings) so the two never read as the same thing
+    g.beginPath(); g.arc(hx, hy, hot ? 3.5 : 2.5, 0, Math.PI*2); g.fillStyle = hot ? col : rgba(col, 0.75); g.fill();
+    if (hot) { g.strokeStyle = C.ink1; g.lineWidth = 1.5; g.stroke(); }
+  }
+  for (let i = 0; i < n.length; i++) {
+    const [x, y] = nodeScreen(env, map, i), o = n[i];
+    const sel = S.sel.has(i), hot = ed.hoverNode === i || (ed.drag && ed.drag.nodes && ed.drag.nodes.includes(i));
+    const r = hot ? 5 : sel ? 4.5 : 4;
+    if (hot) { const rg = g.createRadialGradient(x, y, 0, x, y, 12); rg.addColorStop(0, rgba(col, 0.28)); rg.addColorStop(1, rgba(col, 0)); g.fillStyle = rg; g.fillRect(x-12, y-12, 24, 24); }
+    g.beginPath();
+    if (o.qs && S.qsOn) { g.moveTo(x, y - r - 0.8); g.lineTo(x + r + 0.8, y); g.lineTo(x, y + r + 0.8); g.lineTo(x - r - 0.8, y); g.closePath(); } // Quick-Shift members are diamonds
+    else g.arc(x, y, r, 0, Math.PI*2);
+    g.fillStyle = sel ? C.textHi : hot ? col : C.ink1; g.fill();
+    g.strokeStyle = col; g.lineWidth = 2; g.stroke();
+  }
+}
+function drawToolPreviews(map, col) {
+  if (ed.marquee) { const m = ed.marquee; const x = Math.min(m.x0, m.x1), y = Math.min(m.y0, m.y1), w = Math.abs(m.x1 - m.x0), h = Math.abs(m.y1 - m.y0);
+    g.fillStyle = 'rgba(245,240,230,0.05)'; g.fillRect(x, y, w, h); strokeRR(Math.round(x) + .5, Math.round(y) + .5, Math.round(w), Math.round(h), 0, 'rgba(245,240,230,0.4)'); }
+  if (ed.lineTool) { const l = ed.lineTool; line(l.x0, l.y0, l.x1, l.y1, C.textHi, 1.5); for (const [x,y] of [[l.x0,l.y0],[l.x1,l.y1]]) { g.beginPath(); g.arc(x,y,3.5,0,Math.PI*2); g.fillStyle = col; g.fill(); } }
+  if (ed.pencil && ed.pencil.pts.length > 1) { g.beginPath(); ed.pencil.pts.forEach(([x,y],i)=> i ? g.lineTo(x,y) : g.moveTo(x,y)); g.strokeStyle = C.textHi; g.lineWidth = 1.5; g.lineJoin = 'round'; g.stroke(); }
+}
+function qsRange(env) { const m = env.n.filter(o => o.qs); if (!m.length) return null; return [Math.min(...m.map(o=>o.x)), Math.max(...m.map(o=>o.x))]; }
+function drawQuickShift(env, map, col) {
+  const [qx, qy, qw, qh] = E.qs;
+  if (!S.qsOn) return;
+  fillRR(qx, qy, qw, qh, 2, C.ink0);
+  const rg = qsRange(env);
+  if (!rg) { text('Quick shift: Ctrl-click nodes to group them', qx + qw/2, qy + qh/2 + .5, { size: 10, col: C.textDim, align: 'center' }); return; }
+  const x0 = X(map.toTimeline(rg[0])), x1 = X(map.toTimeline(rg[1]));
+  const hv = hov('qsBar'), hl = hov('qsL'), hr2 = hov('qsR');
+  const active = ed.drag && ed.drag.kind && ed.drag.kind.startsWith('qs');
+  if (hv > 0.05 || active) { g.fillStyle = rgba(col, 0.05); g.fillRect(x0, PY, x1 - x0, PH); line(x0 + .5, PY, x0 + .5, PY + PH, rgba(col, 0.3)); line(x1 - .5, PY, x1 - .5, PY + PH, rgba(col, 0.3)); }
+  fillRR(x0, qy + 2, Math.max(8, x1 - x0), qh - 4, 2, rgba(col, 0.2 + 0.12*Math.max(hv, active ? 1 : 0)));
+  line(x0 + 2, qy + 2.5, x1 - 2, qy + 2.5, rgba(col, 0.6));
+  const cx = (x0 + x1)/2; for (const o of [-3, 0, 3]) line(cx + o + .5, qy + 5, cx + o + .5, qy + qh - 5, rgba(C.textHi, 0.55));
+  fillRR(x0 - 1, qy + 1, 3, qh - 2, 1, rgba(col, 0.6 + 0.4*hl)); fillRR(x1 - 2, qy + 1, 3, qh - 2, 1, rgba(col, 0.6 + 0.4*hr2));
+  if (ed.drag && ed.drag.kind === 'qsMove') { const ms = ed.drag.delta * cycleSec() * 1000; text(`${ms >= 0 ? '+' : '−'}${Math.abs(ms).toFixed(1)} ms`, cx, qy - 8, { size: 10.5, weight: 620, col: C.textHi, align: 'center' }); }
+  // hit regions
+  region('qsL', x0 - 5, qy, 9, qh, { cursor: 'ew-resize', hint: 'Quick shift range start — nodes inside the range join the group', onDown: () => qsStart('qsL', env), onDrag: (mx) => qsDrag(mx), onUp: qsEnd });
+  region('qsR', x1 - 4, qy, 9, qh, { cursor: 'ew-resize', hint: 'Quick shift range end', onDown: () => qsStart('qsR', env), onDrag: (mx) => qsDrag(mx), onUp: qsEnd });
+  region('qsBar', x0 + 4, qy, Math.max(0, x1 - x0 - 8), qh, { cursor: 'grab', hint: 'Quick shift: drag to move the dip and recovery together (Shift = fine)', onDown: (mx) => qsStart('qsMove', env, mx), onDrag: (mx, my, dx, dy, m) => qsDrag(mx, m), onUp: qsEnd });
+  // clicking the empty lane moves nothing; fine
+}
+function qsStart(kind, env, mx) { pushUndo(); ed.drag = { kind, orig: env.clone(), start: invX(ui.mx), delta: 0 }; }
+function qsDrag(mx, m = {}) {
+  const d = ed.drag; if (!d) return; const env = curEnv(); const map = phaseMap();
+  const p = invX(mx), q = map.toNode(p);
+  if (d.kind === 'qsMove') {
+    let delta = (p - d.start) * (m.shift ? 0.25 : 1);
+    const ids = d.orig.n.map((o,i)=>o.qs ? i : -1).filter(i => i >= 0);
+    const lo = Math.max(...ids.map(i => d.orig.n[i-1] ? d.orig.n[i-1].x : 0).filter((_,j)=>!d.orig.n[ids[j]-1]?.qs), 0.0005);
+    const minX = Math.min(...ids.map(i=>d.orig.n[i].x)), maxX = Math.max(...ids.map(i=>d.orig.n[i].x));
+    const prevX = d.orig.n.filter(o => !o.qs && o.x <= minX).reduce((a,o)=>Math.max(a,o.x), 0), nextX = d.orig.n.filter(o => !o.qs && o.x >= maxX).reduce((a,o)=>Math.min(a,o.x), 1);
+    delta = clamp(delta, prevX - minX + 0.001, nextX - maxX - 0.001);
+    if (S.snap && !m.ctrl) { const div = map.d*4; delta = Math.round(delta*div)/div; delta = clamp(delta, prevX - minX + 0.001, nextX - maxX - 0.001); }
+    d.delta = delta;
+    env.n.forEach((o, i) => { if (d.orig.n[i].qs) o.x = d.orig.n[i].x + delta; });
+  } else {
+    const rg = qsRange(d.orig) || [0,0]; let a = rg[0], b = rg[1];
+    if (d.kind === 'qsL') a = Math.min(q, b); else b = Math.max(q, a);
+    env.n.forEach(o => { o.qs = o.x >= a - 1e-4 && o.x <= b + 1e-4 && o !== env.n[0] && o !== env.n[env.n.length-1]; });
+  }
+}
+function qsEnd() { ed.drag = null; S.dirty = true; }
+
+// Editor mouse handling (select / line / pencil) ------------------------------------------------
+function findNode(env, map, x, y) { let best = -1, bd = 8; env.n.forEach((o, i) => { const [nx, ny] = nodeScreen(env, map, i); const d = Math.hypot(nx - x, ny - y); if (d < bd) { bd = d; best = i; } }); return best; }
+function findHandle(env, map, x, y) { for (let i = 0; i < env.n.length - 1; i++) { const a = env.n[i], b = env.n[i+1]; if (b.x - a.x < 0.01) continue;
+  if (!(ed.hoverSeg === i || S.sel.has(i) || S.sel.has(i+1) || ed.hoverHandle === i)) continue;
+  const qm = (a.x + b.x)/2; if (Math.hypot(X(map.toTimeline(qm)) - x, Y(env.evaluate(qm)) - y) < 7) return i; } return -1; }
+function findSeg(env, map, x, y) { const p = invX(x), q = map.toNode(p); const v = env.evaluate(q); if (Math.abs(Y(v) - y) > 7) return -1;
+  let i = 0; while (i < env.n.length - 2 && q >= env.n[i+1].x) i++; return i; }
+function snapQ(q, map, m) { if (S.snap !== !!(m && m.ctrl)) { const d = map.d; return Math.round(q*d)/d; } return q; }
+function editorRegion(env, map) {
+  const [dx, dy, dw, dh] = E.disp;
+  region('editor', PX - 8, PY - 8, PW + 16, PH + 16, {
+    cursor: ['default','crosshair','crosshair'][S.tool],
+    hint: ['Drag nodes · drag a segment to bend · double-click to add/delete · drag empty space to select · Ctrl-click = quick-shift group',
+           'Line: drag from one point to another', 'Pencil: draw; the stroke becomes nodes'][S.tool],
+    onDown: (x, y, m) => edDown(x, y, m), onDrag: (x, y, ddx, ddy, m) => edDrag(x, y, m), onUp: (x, y, m) => edUp(x, y, m),
+    onDbl: (x, y) => edDbl(x, y), onContext: (x, y) => edContext(x, y),
+  });
+  // hover detection (only when idle)
+  if (!ui.active && ui.hot === 'editor') {
+    ed.hoverHandle = findHandle(env, map, ui.mx, ui.my);
+    ed.hoverNode = ed.hoverHandle >= 0 ? -1 : findNode(env, map, ui.mx, ui.my);
+    ed.hoverSeg = ed.hoverNode >= 0 ? -1 : findSeg(env, map, ui.mx, ui.my);
+    if (S.tool === 0) cv.style.cursor = ed.hoverNode >= 0 ? 'move' : (ed.hoverHandle >= 0 || ed.hoverSeg >= 0) ? 'ns-resize' : 'default';
+  } else if (ui.hot !== 'editor' && !ui.active) { ed.hoverNode = ed.hoverSeg = ed.hoverHandle = -1; }
+}
+function edDown(x, y, m) {
+  const env = curEnv(), map = phaseMap();
+  if (S.tool === 1) { pushUndo(); ed.lineTool = { x0: x, y0: y, x1: x, y1: y }; return; }
+  if (S.tool === 2) { pushUndo(); ed.pencil = { pts: [[x, y]] }; return; }
+  const hi = findHandle(env, map, x, y), ni = hi >= 0 ? -1 : findNode(env, map, x, y);
+  if (ni >= 0) {
+    // Ctrl: a click toggles quick-shift membership, a drag moves with snapping inverted
+    if (m.shift) { S.sel.has(ni) ? S.sel.delete(ni) : S.sel.add(ni); } else if (!S.sel.has(ni)) { S.sel.clear(); S.sel.add(ni); }
+    pushUndo(); const nodes = [...S.sel];
+    ed.drag = { kind: 'nodes', nodes, orig: env.clone(), x0: x, y0: y, axis: null, ctrlClick: m.ctrl ? ni : -1, moved: false };
+    return;
+  }
+  const si = hi >= 0 ? hi : findSeg(env, map, x, y);
+  if (si >= 0) { pushUndo(); const a = env.n[si], b = env.n[si+1]; ed.drag = { kind: 'bend', seg: si, t0: a.t, y0: y, dir: b.y >= a.y ? 1 : -1 }; return; }
+  if (!m.shift) S.sel.clear();
+  ed.marquee = { x0: x, y0: y, x1: x, y1: y, base: new Set(S.sel) };
+}
+function edDrag(x, y, m) {
+  const env = curEnv(), map = phaseMap(), d = ed.drag;
+  if (ed.lineTool) { ed.lineTool.x1 = x; ed.lineTool.y1 = y; return; }
+  if (ed.pencil) { ed.pencil.pts.push([clamp(x, PX, PX + PW), clamp(y, PY, PY + PH)]); return; }
+  if (ed.marquee) { const mq = ed.marquee; mq.x1 = x; mq.y1 = y; S.sel = new Set(mq.base);
+    const x0 = Math.min(mq.x0, x), x1 = Math.max(mq.x0, x), y0 = Math.min(mq.y0, y), y1 = Math.max(mq.y0, y);
+    env.n.forEach((o, i) => { const [nx, ny] = nodeScreen(env, map, i); if (nx >= x0 && nx <= x1 && ny >= y0 && ny <= y1) S.sel.add(i); }); return; }
+  if (!d) return;
+  if (d.kind === 'bend') { const t = clamp(d.t0 - (d.y0 - y) / 90 * (m.shift ? 0.25 : 1) * d.dir, -1, 1); /* up = curve up */ env.n[d.seg].t = t; ed.readout = { x, y, s: `Curve ${t >= 0 ? '+' : '−'}${Math.abs(t*100).toFixed(0)}` }; S.dirty = true; return; }
+  if (d.kind === 'nodes') {
+    if (Math.hypot(x - d.x0, y - d.y0) > 2) d.moved = true; else return;
+    let ddx = (x - d.x0) / PW, ddy = -(y - d.y0) / PH;
+    if (m.shift) { ddx *= 0.2; ddy *= 0.2; }
+    if (m.alt) { if (!d.axis) d.axis = Math.abs(x - d.x0) > Math.abs(y - d.y0) ? 'x' : 'y'; if (d.axis === 'x') ddy = 0; else ddx = 0; } else d.axis = null;
+    const last = env.n.length - 1;
+    d.nodes.forEach(i => { const o = d.orig.n[i], t = env.n[i];
+      if (i !== 0 && i !== last) { const q0 = map.toNode(map.toTimeline(o.x)); let q = clamp(map.toNode(clamp(map.toTimeline(o.x) + ddx, 0, 0.99999)), 0.0005, 0.9995); q = snapQ(q, map, m); t.x = clamp(q, 0.0005, 0.9995); }
+      let v = clamp(o.y + ddy, 0, 1); if (v < 0.015) v = 0; if (v > 0.985) v = 1; t.y = v; });
+    // keep order without re-sorting mid-drag: clamp against neighbours that are not dragged
+    for (const i of d.nodes) { if (i === 0 || i === last) continue; const lo = env.n[i-1].x, hi = env.n[i+1].x; if (!d.nodes.includes(i-1)) env.n[i].x = Math.max(env.n[i].x, lo); if (!d.nodes.includes(i+1)) env.n[i].x = Math.min(env.n[i].x, hi); }
+    const o = env.n[d.nodes[0]]; const ms = o.x * cycleSec() * 1000, db = o.y > 0.0001 ? 20*Math.log10(1 - (P.depth/100)*(1 - o.y)) : -Infinity;
+    ed.readout = { x, y, s: `${ms.toFixed(ms < 100 ? 1 : 0)} ms   ${isFinite(db) ? db.toFixed(1).replace('-','−') + ' dB' : '−∞ dB'}` };
+    S.dirty = true;
+  }
+}
+function edUp(x, y, m) {
+  const env = curEnv(), map = phaseMap();
+  if (ed.lineTool) { const l = ed.lineTool; ed.lineTool = null;
+    let q0 = map.toNode(invX(l.x0)), q1 = map.toNode(invX(l.x1)), v0 = invY(l.y0), v1 = invY(l.y1);
+    if (q1 < q0) { [q0, q1] = [q1, q0]; [v0, v1] = [v1, v0]; }
+    q0 = snapQ(q0, map, m); q1 = snapQ(q1, map, m);
+    if (q1 - q0 > 0.002) { env.n = env.n.filter(o => o.x < q0 - 1e-4 || o.x > q1 + 1e-4 || o === env.n[0] || o === env.n[env.n.length-1]);
+      insertNode(env, { x: q0, y: v0, t: 0 }); insertNode(env, { x: q1, y: v1, t: 0 }); env.normalise(); }
+    else S.undo.pop();
+    return; }
+  if (ed.pencil) { const pts = ed.pencil.pts; ed.pencil = null; if (pts.length < 3) { S.undo.pop(); return; }
+    const qs = pts.map(([x, y]) => ({ x: map.toNode(invX(x)), y: invY(y) })).sort((a,b)=>a.x-b.x);
+    const q0 = qs[0].x, q1 = qs[qs.length-1].x; const N = 96, res = [];
+    for (let i = 0; i <= N; i++) { const q = lerp(q0, q1, i/N); let j = 0; while (j < qs.length - 2 && qs[j+1].x < q) j++; const a = qs[j], b = qs[j+1]; const u = b.x > a.x ? clamp((q - a.x)/(b.x - a.x),0,1) : 0; res.push({ x: q, y: lerp(a.y, b.y, u) }); }
+    const simp = rdp(res, 0.012);
+    env.n = env.n.filter(o => o.x < q0 - 1e-4 || o.x > q1 + 1e-4 || o === env.n[0] || o === env.n[env.n.length-1]);
+    simp.forEach(p => insertNode(env, { x: p.x, y: p.y, t: 0 })); env.normalise(); return; }
+  if (ed.marquee) { ed.marquee = null; return; }
+  if (ed.drag && ed.drag.kind === 'nodes' && ed.drag.ctrlClick >= 0 && !ed.drag.moved) { const i = ed.drag.ctrlClick; if (i > 0 && i < env.n.length - 1) env.n[i].qs = !env.n[i].qs; ed.drag = null; return; }
+  if (ed.drag && ed.drag.kind === 'nodes') { const keep = ed.drag.nodes.map(i => env.n[i]); env.normalise(); S.sel = new Set(keep.map(o => env.n.indexOf(o))); }
+  ed.drag = null; ed.readout = null;
+}
+function insertNode(env, o) { if (o.x <= 0) { env.n[0].y = o.y; return; } if (o.x >= 1) { env.n[env.n.length-1].y = o.y; return; } env.n.push({ x: o.x, y: o.y, t: o.t || 0, qs: false }); env.n.sort((a,b)=>a.x-b.x); }
+function edDbl(x, y) {
+  const env = curEnv(), map = phaseMap(); if (S.tool !== 0) return;
+  const ni = findNode(env, map, x, y);
+  if (ni >= 0) { if (ni === 0 || ni === env.n.length - 1) return; pushUndo(); env.n.splice(ni, 1); S.sel.clear(); return; }
+  const hi = findHandle(env, map, x, y); if (hi >= 0) { pushUndo(); env.n[hi].t = 0; return; }
+  pushUndo(); let q = snapQ(map.toNode(invX(x)), map, ui.mods); const o = { x: q, y: invY(y), t: 0, qs: false };
+  env.n.push(o); env.n.sort((a,b)=>a.x-b.x); if (o.x <= 0) o.x = 0.0005; S.sel = new Set([env.n.indexOf(o)]);
+}
+function deleteSelected() { const env = curEnv(); pushUndo(); const last = env.n[env.n.length-1], first = env.n[0]; env.n = env.n.filter((o, i) => !S.sel.has(i) || o === first || o === last); S.sel.clear(); }
+function edContext(x, y) {
+  const env = curEnv(), map = phaseMap(), ni = findNode(env, map, x, y);
+  if (ni >= 0) { const o = env.n[ni], end = ni === 0 || ni === env.n.length - 1;
+    openMenu(x, y, [ { label: 'Delete node', act: () => { pushUndo(); env.n.splice(ni, 1); }, dim: end },
+      { label: o.qs ? 'Remove from quick shift' : 'Add to quick shift', act: () => { pushUndo(); o.qs = !o.qs; }, dim: end },
+      { label: 'Straighten segment', act: () => { pushUndo(); o.t = 0; } }, { label: 'Step here (vertical jump)', act: () => { pushUndo(); insertNode(env, { x: o.x + 0.0001, y: o.y > 0.5 ? 0 : 1 }); }, dim: end } ]);
+    return; }
+  openMenu(x, y, [ { label: 'Select all', act: () => { S.sel = new Set(env.n.map((_,i)=>i)); } }, { label: 'Flip vertically', act: () => { pushUndo(); env.n.forEach(o => { o.y = 1 - o.y; }); /* affine in y: tension unchanged */ } },
+    { label: 'Mirror horizontally', act: () => { pushUndo(); const n = env.n; const m = n.map((o, i) => ({ x: 1 - o.x, y: o.y, t: 0, qs: o.qs })).reverse(); for (let i = 0; i < m.length - 1; i++) m[i].t = -n[n.length - 2 - i].t; setCurEnv(new Envelope(m)); } },
+    { label: 'Reset to default duck', act: () => { pushUndo(); startMorph(new Envelope(SHAPES.Sidechain[0])); } }, null,
+    { label: 'Save shape to User…', act: () => { SHAPES.User.unshift(env.n.map(o=>({...o}))); S.libTab = 'User'; S.libPage = 0; } } ]);
+}
+
+// Centre: footer row + library -------------------------------------------------------------------
+function drawEditorFooter() {
+  const y = 424, h = 24;
+  if (P.multi) {
+    const linked = P.envLink > 0.5; well(256, y, 150, h, 3);
+    const tabs = [['Low', 0, C.duck], ['High', 1, C.high]];
+    tabs.forEach(([lab, i, col], j) => { const x = 258 + j*92, w = 54, id = 'band' + i, hv = hov(id), sel = linked || S.editBand === i;
+      region(id, x, y + 2, w, h - 4, { onDown: () => { S.editBand = i; S.sel.clear(); }, cursor: 'pointer', hint: linked ? 'Envelopes linked: both bands follow the low envelope' : `Edit the ${lab.toLowerCase()} band envelope` });
+      if (sel && !linked) raised(x, y + 2, w, h - 4, 2, C.ink5);
+      fillRR(x + 8, y + h/2 - 3, 6, 6, 1.5, sel ? col : rgba(col, 0.35));
+      text(lab, x + 20, y + h/2 + .5, { col: sel ? C.textHi : mixHex(C.textMute, C.text, hv), weight: sel ? 620 : 500 }); });
+    iconButton('envLink', linked ? 'link' : 'unlink', 314, y + 2, 34, h - 4, { on: linked, activeCol: C.textHi, onClick: () => { pushUndo(); P.envLink = linked ? 0 : 1; if (!linked) S.editBand = 0; else S.envB = S.envA.clone(); }, hint: linked ? 'Linked: the high band follows the low envelope. Click to unlink' : 'Unlinked: each band has its own envelope. Click to link' });
+  }
+  const qx = P.multi ? 414 : 256;
+  lampButton('qsOn', 'Quick shift', qx, y, 98, h, S.qsOn, () => { S.qsOn = !S.qsOn; }, { hint: 'Show the quick-shift bar: move the dip + recovery as one' });
+  valueField('rotate', 'rotate', qx + 104, y, 96, h, 'Rotate');
+  // capture
+  const rx = 776, rw = 92, hv = hov('rec');
+  region('rec', rx, y, rw, h, { onDown: () => { if (S.rec) { S.rec = 0; } else { S.rec = 1; } }, cursor: 'pointer', hint: S.rec ? 'Cancel capture' : 'Capture: record one cycle of the sidechain and turn it into a shape' });
+  raised(rx, y, rw, h, 3, C.ink4, hv);
+  if (S.rec === 2) { g.save(); rr(rx, y, rw, h, 3); g.clip(); g.fillStyle = rgba(C.kick, 0.22); g.fillRect(rx, y, rw*S.recProgress, h); g.restore(); }
+  const blink = S.rec === 1 ? (0.4 + 0.6*(Math.sin(performance.now()/180) > 0 ? 1 : 0.2)) : 1;
+  icon(S.rec ? 'stop' : 'rec', rx + 14, y + h/2, rgba(C.kick, blink), S.rec ? 0.75 : 0.9);
+  text(S.rec === 1 ? 'Armed' : S.rec === 2 ? 'Capturing' : 'Capture', rx + 26, y + h/2 + .5, { col: S.rec ? C.textHi : mixHex(C.textMute, C.text, hv) });
+}
+function thumbCurve(nodes, x, y, w, h, col, fillA) {
+  const env = new Envelope(nodes); g.beginPath();
+  for (let i = 0; i <= 48; i++) { const q = i/48, v = env.evaluate(q); const px = x + q*w, py = y + (1 - v)*h; i ? g.lineTo(px, py) : g.moveTo(px, py); }
+  g.save(); g.lineTo(x + w, y + h); g.lineTo(x, y + h); g.closePath(); g.fillStyle = rgba(col, fillA); g.fill(); g.restore();
+  g.beginPath(); for (let i = 0; i <= 48; i++) { const q = i/48, v = env.evaluate(q); const px = x + q*w, py = y + (1 - v)*h; i ? g.lineTo(px, py) : g.moveTo(px, py); }
+  g.strokeStyle = col; g.lineWidth = 1.5; g.lineJoin = 'round'; g.stroke();
+}
+function drawLibrary() {
+  const x0 = 256, y0 = 464, w = 612;
+  const tabs = ['Sidechain', 'Rhythmic', 'Simple', 'User', 'Favourites'];
+  let tx = x0;
+  tabs.forEach(t => { const id = 'lt' + t, hv = hov(id), sel = S.libTab === t, tw = measure(t, 11.5, FONT.sc, 620) + (t === 'Favourites' ? 16 : 0);
+    region(id, tx - 4, y0, tw + 8, 22, { onDown: () => { S.libTab = t; S.libPage = 0; }, cursor: 'pointer', hint: `${t} shapes` });
+    if (t === 'Favourites') icon('starOn', tx + 5, y0 + 10, sel ? C.duck : C.textDim, 0.75);
+    text(t, tx + (t === 'Favourites' ? 14 : 0), y0 + 10.5, { size: 11.5, weight: 620, col: sel ? C.textHi : mixHex(C.textDim, C.textMute, hv) });
+    if (sel) fillRR(tx, y0 + 20, tw, 2, 1, C.duck);
+    tx += tw + 20; });
+  let items = S.libTab === 'Favourites' ? [...favShapes].map(s => { const [c, i] = s.split(':'); return { nodes: SHAPES[c][+i], key: s, cat: c, idx: +i }; })
+    : SHAPES[S.libTab].map((n, i) => ({ nodes: n, key: S.libTab + ':' + i, cat: S.libTab, idx: i }));
+  const per = 16, pages = Math.max(1, Math.ceil(items.length / per)); S.libPage = clamp(S.libPage, 0, pages - 1);
+  // paging + save
+  iconButton('lPrev', 'prev', x0 + w - 150, y0 - 2, 22, 24, { onClick: () => { S.libPage = Math.max(0, S.libPage - 1); }, disabled: S.libPage === 0, hint: 'Previous page' });
+  text(`${S.libPage + 1} / ${pages}`, x0 + w - 116, y0 + 10.5, { col: C.textDim, align: 'center' });
+  iconButton('lNext', 'next', x0 + w - 104, y0 - 2, 22, 24, { onClick: () => { S.libPage = Math.min(pages - 1, S.libPage + 1); }, disabled: S.libPage >= pages - 1, hint: 'Next page' });
+  const shv = hov('lSave'); region('lSave', x0 + w - 76, y0 - 2, 76, 24, { onDown: () => { SHAPES.User.unshift(curEnv().n.map(o => ({...o}))); S.libTab = 'User'; S.libPage = 0; }, cursor: 'pointer', hint: 'Save the current envelope as a User shape' });
+  icon('plus', x0 + w - 66, y0 + 10, mixHex(C.textMute, C.textHi, shv), 0.75); text('Save shape', x0 + w, y0 + 10.5, { col: mixHex(C.textMute, C.textHi, shv), align: 'right' });
+  // thumbnails 8 x 2
+  // One recessed "shape bank" instead of 16 floating cards: cells share a well and are separated by
+  // hairline gutters, like a contact sheet. Selection = yellow curve + a 2 px bar under the cell.
+  const gy = y0 + 30, bw = w, bh = 128, cw = bw/8, ch = bh/2;
+  well(x0, gy, bw, bh, 3);
+  for (let c = 1; c < 8; c++) line(Math.round(x0 + c*cw) + .5, gy + 6, Math.round(x0 + c*cw) + .5, gy + bh - 6, 'rgba(255,248,235,0.045)');
+  line(x0 + 6, gy + ch + .5, x0 + bw - 6, gy + ch + .5, 'rgba(255,248,235,0.045)');
+  S.libHover = -1;
+  items.slice(S.libPage*per, S.libPage*per + per).forEach((it, j) => {
+    const cx = x0 + (j % 8)*cw, cy = gy + Math.floor(j / 8)*ch, id = 'th' + it.key, hv = hov(id, 18);
+    const cur = sameShape(it.nodes, curEnv());
+    region(id, cx, cy, cw, ch, { onDown: () => { pushUndo(); startMorph(new Envelope(it.nodes)); }, cursor: 'pointer', onWheel: d => { S.libPage = clamp(S.libPage - d, 0, pages - 1); },
+      onContext: (mx, my) => openMenu(mx, my, [{ label: favShapes.has(it.key) ? 'Remove from favourites' : 'Add to favourites', act: () => favShapes.has(it.key) ? favShapes.delete(it.key) : favShapes.add(it.key) }, { label: 'Rename…', dim: it.cat !== 'User', act: () => {} }, { label: 'Delete', dim: it.cat !== 'User', act: () => { SHAPES.User.splice(it.idx, 1); } }]),
+      hint: `${SHAPE_NAMES[it.cat]} ${it.idx + 1} — hover previews in the editor, click to apply, right-click for favourite` });
+    if (ui.hot === id) S.libHover = S.libTab === 'Favourites' ? -1 : it.idx;
+    if (hv > 0.01) fillRR(cx + 3, cy + 3, cw - 6, ch - 6, 2, `rgba(255,248,235,${0.04*hv})`);
+    const col = cur ? C.duck : mixHex(C.textMute, C.textHi, hv);
+    thumbCurve(it.nodes, cx + 10, cy + 10, cw - 20, ch - 20, col, cur ? 0.10 : 0.035 + 0.04*hv);
+    if (cur) fillRR(cx + 10, cy + ch - 5, cw - 20, 2, 1, C.duck);
+    if (favShapes.has(it.key)) icon('starOn', cx + cw - 9, cy + 9, cur ? C.duck : rgba(C.duck, 0.7), 0.5);
+  });
+}
+function sameShape(nodes, env) { if (nodes.length !== env.n.length) return false; return nodes.every((o, i) => Math.abs(o.x - env.n[i].x) < 1e-3 && Math.abs(o.y - env.n[i].y) < 1e-3 && Math.abs((o.t||0) - env.n[i].t) < 1e-3); }
+
+// Right column: Depth, Bands, Stereo, Output ------------------------------------------------------
+function drawRight() {
+  const x = 896, w = 168;
+  sectionTitle('Depth', x, 64);
+  const live = (P.depth/100) * (1 - B.valueA);
+  knob('depth', 'depth', 980, 150, { size: 'hero', col: C.duck, live: (B.playing || P.mode) ? live : 0 });
+  text('0', 980 - 44, 150 + 52, { size: 9.5, col: C.textDim, align: 'center' }); text('100', 980 + 44, 150 + 52, { size: 9.5, col: C.textDim, align: 'center' });
+  valueText('depthV', 'depth', 980, 222, false, { size: 17, font: FONT.exp, weight: 600, col: C.textHi });
+  groove(892, 244, 1068, 244);
+  // Bands
+  const on = P.multi > 0.5; sectionTitle('Bands', x, 262);
+  lampButton('multi', 'Split', x + w - 64, 251, 64, 22, on, () => { pushUndo(); P.multi = on ? 0 : 1; if (!on) S.editBand = 0; }, { hint: 'Multiband: duck low and high bands separately' });
+  crossoverGraph(x, 282, w, 66, on);
+  segmented('slope', x, 356, 92, 22, ['12', '24 dB'], P.slope, i => { pushUndo(); P.slope = i; }, { disabled: !on, fixed: true });
+  // solo buttons
+  [['L', 1, C.duck], ['H', 2, C.high]].forEach(([lab, v, col], j) => { const bx = x + 100 + j*35, id = 'solo' + v, hv = hov(id), s = P.bandSolo === v;
+    region(id, bx, 356, 33, 22, { onDown: () => { if (!on) return; pushUndo(); P.bandSolo = s ? 0 : v; }, cursor: on ? 'pointer' : 'default', hint: `Solo the ${lab === 'L' ? 'low' : 'high'} band` });
+    raised(bx, 356, 33, 22, 3, s ? C.ink5 : C.ink4, on ? hv : 0);
+    icon('phones', bx + 11, 366.5, !on ? C.textDim : s ? col : C.textMute, 0.85); text(lab, bx + 24, 367.5, { weight: 620, col: !on ? C.textDim : s ? col : C.textMute, align: 'center' }); });
+  knob('loMix', 'loMix', x + 38, 412, { label: 'Low mix', col: C.duck, dim: !on });
+  knob('hiMix', 'hiMix', x + w - 38, 412, { label: 'High mix', col: C.high, dim: !on });
+  groove(892, 470, 1068, 470);
+  // Stereo
+  sectionTitle('Stereo', x, 488); text(fmt('midSide'), x + w, 488.5, { weight: 620, col: C.text, align: 'right' });
+  msSlider(x, 500, w);
+  groove(892, 548, 1068, 548);
+  // Output
+  sectionTitle('Output', x, 566);
+  knob('outGain', 'outGain', x + 22, 598, { bipolar: true });
+  text(fmt('outGain'), x + 50, 592, { weight: 620, col: C.text }); text('gain', x + 50, 606, { col: C.textDim });
+  lampButton('delta', 'Delta', x + w - 66, 556, 66, 22, P.delta > 0.5, () => { pushUndo(); P.delta = P.delta > 0.5 ? 0 : 1; }, { hint: 'Delta: hear only what is being removed' });
+  // GR meter
+  const gr = clamp(-B.gr, 0, 36), mx = x + w - 66, my = 592, mw = 66;
+  fillRR(mx, my, mw, 5, 1, C.ink0); fillRR(mx + mw - mw*gr/36, my, mw*gr/36, 5, 1, C.duck);
+  text(`GR ${gr < 0.05 ? '0.0' : '−' + gr.toFixed(1)}`, mx + mw, my + 15, { size: 10, col: C.textDim, align: 'right' });
+}
+function crossoverGraph(x, y, w, h, on) {
+  well(x, y, w, h, 3);
+  const f2x = f => x + 4 + (w - 8) * Math.log(f/20)/Math.log(1000), x2f = px => 20 * Math.pow(1000, clamp((px - x - 4)/(w - 8), 0, 1));
+  g.save(); rr(x, y, w, h, 3); g.clip(); if (!on) g.globalAlpha = 0.4;
+  for (const f of [100, 1000, 10000]) line(f2x(f) + .5, y + 4, f2x(f) + .5, y + h - 4, 'rgba(255,248,235,0.045)');
+  const top = y + 12, bot = y + h - 4, fc = P.crossover, ord = P.slope ? 4 : 2;
+  for (const [band, col] of [[0, C.duck], [1, C.high]]) {
+    g.beginPath(); for (let px = x; px <= x + w; px += 1.5) { const f = x2f(px), r = Math.pow(f/fc, ord); const m = band ? r/(1 + r) : 1/(1 + r); const yy = lerp(bot, top, Math.pow(m, 0.6)); px === x ? g.moveTo(px, yy) : g.lineTo(px, yy); }
+    g.lineTo(x + w, bot); g.lineTo(x, bot); g.closePath(); g.fillStyle = rgba(col, P.bandSolo && P.bandSolo !== band + 1 ? 0.03 : 0.12); g.fill();
+    g.beginPath(); for (let px = x; px <= x + w; px += 1.5) { const f = x2f(px), r = Math.pow(f/fc, ord); const m = band ? r/(1 + r) : 1/(1 + r); const yy = lerp(bot, top, Math.pow(m, 0.6)); px === x ? g.moveTo(px, yy) : g.lineTo(px, yy); }
+    g.strokeStyle = rgba(col, P.bandSolo && P.bandSolo !== band + 1 ? 0.35 : 1); g.lineWidth = 1.5; g.stroke();
+  }
+  const cx = f2x(fc), hv = hov('xover');
+  line(Math.round(cx) + .5, y + 3, Math.round(cx) + .5, y + h - 3, hv > 0.3 ? C.textHi : 'rgba(245,240,230,0.55)', 1);
+  fillRR(cx - 3, y + 3, 6, 9, 1.5, hv > 0.3 ? C.textHi : C.text);
+  const lab = fmt('crossover'), lw = measure(lab, 10.5, FONT.sc, 620);
+  const lx = cx + 7 + lw > x + w - 4 ? cx - 7 - lw : cx + 7;
+  text(lab, lx, y + 8.5, { size: 10.5, weight: 620, col: C.textHi });
+  g.restore();
+  region('xover', x, y, w, h, { onDown: (mx) => { pushUndo(); }, onDrag: (mx, my, dx, dy, m) => setParam('crossover', P.crossover*Math.pow(1000, dx*(m.shift ? 0.1 : 1)/(w-8))), // relative: grabbing never jumps
+    onDbl: () => { P.crossover = 150; }, onWheel: (d, m) => setParam('crossover', P.crossover*Math.pow(1.03, d*(m.shift ? 0.2 : 1))), cursor: 'ew-resize', hint: `Crossover ${fmt('crossover')} — drag · wheel · double-click reset` });
+}
+function msSlider(x, y, w) {
+  const tx = x + 8, tw = w - 16, ty = y + 12, n = (P.midSide + 100)/200, hv = hov('ms');
+  region('ms', x, y, w, 36, { ...paramDrag('midSide', tw, true), onDown: (mx, my, m) => { if (m.ctrl) { pushUndo(); P.midSide = 0; return; } pushUndo(); ui.msStart = P.midSide; ui.msX = mx; },
+    onDrag: (mx, my, dx, dy, m) => { setParam('midSide', P.midSide + dx*(m.shift ? 0.1 : 1)*200/tw); }, onDbl: () => { P.midSide = 0; }, cursor: 'ew-resize' });
+  fillRR(tx, ty - 1.5, tw, 3, 1.5, C.ink0);
+  line(tx + tw/2 + .5, ty - 6, tx + tw/2 + .5, ty + 6, C.ink7);
+  const kx = tx + n*tw; if (Math.abs(P.midSide) > 0.5) { g.fillStyle = C.textMute; g.fillRect(Math.min(kx, tx + tw/2), ty - 1, Math.abs(kx - tx - tw/2), 2); }
+  dropShadow(kx - 5, ty - 8, 10, 16, 2, 4, 0.5, 1.5);
+  raised(kx - 5, ty - 8, 10, 16, 2, hv > 0.3 ? C.ink7 : C.ink6);
+  line(kx + .5 - 0, ty - 4, kx + .5, ty + 4, C.textHi, 1);
+  text('Mid', tx - 2, y + 30, { col: P.midSide < -0.5 ? C.text : C.textDim }); text('Side', tx + tw + 2, y + 30, { col: P.midSide > 0.5 ? C.text : C.textDim, align: 'right' });
+}
+
+// Footer --------------------------------------------------------------------------------------
+function drawFooter() {
+  if (!S.noHints) text(S.hint || 'Hover anything for help. Ctrl+Z undo · Ctrl+A select all nodes · Delete removes selected nodes', 16, 646.5, { size: 10.5, col: S.hint ? C.textMute : C.textDim });
+  const hv = hov('scaleBtn'); region('scaleBtn', 994, 636, 60, 20, { onDown: () => openMenu(994, 632, settingsMenu().slice(0, 6), { up: true }), cursor: 'pointer', hint: 'UI size' });
+  text(`${Math.round(S.scale*100)} %`, 1040, 646.5, { size: 10.5, col: mixHex(C.textDim, C.text, hv), align: 'right' });
+  icon('caret', 1047, 646.5, C.textDim, 0.7);
+  const ghv = hov('grip'); region('grip', 1058, 636, 22, 24, { cursor: 'nwse-resize', hint: 'Drag to resize (keeps the aspect ratio, 100–200 %)',
+    onDrag: (x) => { const ns = clamp(Math.round((x + 6) * S.scale / W * 20) / 20, 1, 2); if (ns !== S.scale) setScale(ns); } });
+  icon('grip', 1070, 650, ghv > 0.3 ? C.textMute : C.textDim, 0.9);
+}
+
+// Overlays ------------------------------------------------------------------------------------
+function drawMenu() {
+  const M = S.menu; if (!M) return;
+  region('menuCatch', 0, 0, W, H, { onDown: () => { S.menu = null; } });
+  if (M.id === 'rate') return drawRateMenu(M);
+  if (M.id === 'grid') { M.items = GRIDS.map((gg, i) => ({ label: gg[0], check: Math.round(P.grid) === i, act: () => { P.grid = i; } })); }
+  const items = M.items; const iw = Math.max(150, ...items.filter(Boolean).map(i => measure(i.label, 11.5) + 44)); const ih = 22;
+  const hgt = items.reduce((a, i) => a + (i ? ih : 9), 8);
+  let mx = M.right ? M.right - iw : M.x, my = M.up ? M.y - hgt - 4 : M.y; mx = clamp(mx, 4, W - iw - 4); my = clamp(my, 4, H - hgt - 4);
+  dropShadow(mx, my, iw, hgt, 4, 18, 0.5, 6); fillRR(mx, my, iw, hgt, 4, C.ink3); strokeRR(mx + .5, my + .5, iw - 1, hgt - 1, 4, C.ink6);
+  let yy = my + 4;
+  items.forEach((it, i) => {
+    if (!it) { line(mx + 8, yy + 4.5, mx + iw - 8, yy + 4.5, C.ink5); yy += 9; return; }
+    const id = 'mi' + i, hv = it.header || it.dim ? 0 : hov(id, 30);
+    if (!it.header) region(id, mx + 4, yy, iw - 8, ih, { onDown: () => { if (it.dim) return; S.menu = null; it.act && it.act(); }, cursor: it.dim ? 'default' : 'pointer' });
+    if (hv > 0.01) fillRR(mx + 4, yy, iw - 8, ih, 3, rgba('#FFF8EB', 0.07*hv));
+    if (it.check) { g.beginPath(); g.moveTo(mx + 12, yy + 11); g.lineTo(mx + 15, yy + 14); g.lineTo(mx + 20, yy + 7.5); g.strokeStyle = C.duck; g.lineWidth = 1.5; g.lineCap = 'round'; g.stroke(); }
+    text(it.label, mx + 28, yy + ih/2 + .5, { size: it.header ? 10.5 : 11.5, col: it.header ? C.textDim : it.dim ? C.textDim : mixHex(C.text, C.textHi, hv), weight: 500 });
+    yy += ih;
+  });
+}
+function drawRateMenu(M) {
+  // the rate picker is a grid: rows = straight / dotted / triplet, columns = note length
+  const cols = ['4/1','2/1','1/1','1/2','1/4','1/8','1/16','1/32','1/64'];
+  const rows = [['Straight',''],['Dotted','.'],['Triplet','T']];
+  const cw = 42, ch = 26, lw = 60, mw = lw + cols.length*cw + 12, mh = rows.length*ch + 34;
+  const mx = M.x, my = M.y;
+  dropShadow(mx, my, mw, mh, 4, 18, 0.5, 6); fillRR(mx, my, mw, mh, 4, C.ink3); strokeRR(mx + .5, my + .5, mw - 1, mh - 1, 4, C.ink6);
+  text('Cycle length', mx + 10, my + 14, { size: 10.5, col: C.textDim });
+  text('bars', mx + lw + 1.5*cw, my + 14, { size: 10, col: C.textDim, align: 'center' }); text('beats and below', mx + lw + 6*cw, my + 14, { size: 10, col: C.textDim, align: 'center' });
+  rows.forEach(([rl, suf], r) => {
+    const yy = my + 26 + r*ch; text(rl, mx + 10, yy + ch/2, { col: C.textMute });
+    cols.forEach((c, j) => {
+      const lab = c + suf, idx = RATES.findIndex(rt => rt[0] === lab); const xx = mx + lw + j*cw;
+      if (idx < 0) { fillRR(xx + 20, yy + ch/2, 2, 1, 0, C.ink6); return; }
+      const id = 'rt' + idx, hv = hov(id, 30), sel = Math.round(P.rate) === idx;
+      region(id, xx + 1, yy + 1, cw - 2, ch - 2, { onDown: () => { pushUndo(); P.rate = idx; S.menu = null; }, cursor: 'pointer', hint: `${lab} = ${(RATES[idx][1]*60/B.bpm*1000).toFixed(0)} ms at ${B.bpm} bpm` });
+      if (sel) fillRR(xx + 2, yy + 2, cw - 4, ch - 4, 3, C.ink5); else if (hv > 0.01) fillRR(xx + 2, yy + 2, cw - 4, ch - 4, 3, rgba('#FFF8EB', 0.06*hv));
+      text(lab, xx + cw/2, yy + ch/2 + .5, { weight: sel ? 620 : 500, col: sel ? C.duck : mixHex(C.text, C.textHi, hv), align: 'center' });
+    });
+  });
+}
+function drawPresetBrowser() {
+  if (S.overlay !== 'presets') return;
+  const x = 248, y = 44, w = 828, h = 588;
+  region('pbCatch', 0, 44, W, 588, {});
+  dropShadow(x, y + 2, w, h - 6, 4, 24, 0.55, 8);
+  fillRR(x, y + 2, w, h - 6, 4, C.ink2); strokeRR(x + .5, y + 2.5, w - 1, h - 7, 4, C.ink6);
+  // search
+  well(x + 16, y + 16, 300, 28, 3); icon('search', x + 32, y + 30, C.textDim, 0.85); text(S.pbQuery || 'Search presets', x + 46, y + 30.5, { col: S.pbQuery ? C.textHi : C.textDim });
+  iconButton('pbClose', 'close', x + w - 40, y + 16, 28, 28, { onClick: () => { S.overlay = null; }, hint: 'Close (Esc)' });
+  // categories
+  const cats = ['All presets', 'Favourites', 'User', null, 'Basics', 'Groove', 'Spectral', 'Ring Mod', 'Multiband', 'Audio', 'MIDI'];
+  S.pbCat = S.pbCat || 'All presets';
+  let cy = y + 60;
+  cats.forEach(c => { if (!c) { line(x + 24, cy + 6.5, x + 180, cy + 6.5, C.ink5); cy += 14; return; }
+    const id = 'pbc' + c, hv = hov(id), sel = S.pbCat === c;
+    region(id, x + 16, cy, 172, 24, { onDown: () => { S.pbCat = c; }, cursor: 'pointer' });
+    if (sel) fillRR(x + 16, cy, 172, 24, 3, C.ink4);
+    if (c === 'Favourites') icon('starOn', x + 30, cy + 12, sel ? C.duck : C.textDim, 0.7);
+    text(c, x + (c === 'Favourites' ? 42 : 28), cy + 12.5, { col: sel ? C.textHi : mixHex(C.textMute, C.text, hv), weight: sel ? 620 : 500 });
+    const cnt = PRESETS.filter(p => c === 'All presets' || p[0] === c || (c === 'Favourites' && favPresets.has(p[1]))).length;
+    text(String(c === 'User' ? 0 : cnt), x + 180, cy + 12.5, { size: 10.5, col: C.textDim, align: 'right' });
+    cy += 26; });
+  line(x + 204.5, y + 56, x + 204.5, y + h - 60, C.ink5);
+  // list
+  const list = PRESETS.map((p, i) => ({ p, i })).filter(({ p }) => S.pbCat === 'All presets' || p[0] === S.pbCat || (S.pbCat === 'Favourites' && favPresets.has(p[1])));
+  const lx = x + 220, lw = w - 236;
+  text('Name', lx + 36, y + 66, { size: 10.5, col: C.textDim }); text('Category', lx + 300, y + 66, { size: 10.5, col: C.textDim }); text('Mode', lx + 440, y + 66, { size: 10.5, col: C.textDim });
+  list.forEach(({ p, i }, j) => {
+    const ry = y + 80 + j*26, id = 'pbr' + i, hv = hov(id, 30), sel = S.preset === i;
+    if (ry > y + h - 80) return;
+    region(id, lx, ry, lw, 26, { onDown: (mx) => { if (mx < lx + 28) { favPresets.has(p[1]) ? favPresets.delete(p[1]) : favPresets.add(p[1]); return; } loadPreset(i); }, onDbl: () => { loadPreset(i); S.overlay = null; }, cursor: 'pointer', hint: 'Click to load · double-click to load and close · star to favourite' });
+    if (sel) { fillRR(lx, ry, lw, 26, 3, C.ink4); fillRR(lx, ry + 5, 2, 16, 1, C.duck); } else if (hv > 0.01) fillRR(lx, ry, lw, 26, 3, rgba('#FFF8EB', 0.04*hv));
+    const fav = favPresets.has(p[1]); icon(fav ? 'starOn' : 'star', lx + 16, ry + 13, fav ? C.duck : hv > 0.3 ? C.textMute : C.ink7, 0.75);
+    text(p[1], lx + 36, ry + 13.5, { weight: sel ? 620 : 500, col: sel ? C.textHi : C.text, size: 12 });
+    text(p[0], lx + 300, ry + 13.5, { col: C.textMute });
+    const md = MODES[p[2].mode || 0] + (p[2].multi ? ' · Split' : ''); text(md, lx + 440, ry + 13.5, { col: C.textDim });
+  });
+  // footer
+  line(x + 16, y + h - 56.5, x + w - 16, y + h - 56.5, C.ink5);
+  lampButton('pbSave', 'Save as…', x + w - 236, y + h - 44, 100, 28, false, () => {}, { hint: 'Save the current state as a new user preset' });
+  lampButton('pbFolder', 'Open folder', x + w - 128, y + h - 44, 112, 28, false, () => {}, { icn: 'folder', hint: 'Documents\\Kickarse\\Presets' });
+  text(`${list.length} presets · ↑/↓ to step · Enter to load`, x + 24, y + h - 30, { col: C.textDim });
+}
+
+// =============================================================================================
+// 11. Frame loop
+// =============================================================================================
+let frameDt = 1/60, lastT = performance.now();
+function frame(now) {
+  frameDt = Math.min(0.05, (now - lastT)/1000); lastT = now;
+  if (!window.__frozen) engineStep(frameDt);
+  S.trigFlash = Math.max(0, S.trigFlash - frameDt*5); S.midiFlash = Math.max(0, S.midiFlash - frameDt*5);
+  S.savedFlash = Math.max(0, S.savedFlash - frameDt*0.8); S.capturedFlash = Math.max(0, S.capturedFlash - frameDt*0.35);
+  if (S.morph) { S.morph.t += frameDt/0.18; if (S.morph.t >= 1) S.morph = null; }
+  draw();
+  if (S.shotFrames !== undefined && --S.shotFrames <= 0) { document.title = 'ready'; return; } // screenshot mode: stop after a few frames
+  requestAnimationFrame(frame);
+}
+function draw() {
+  ui.regions = [];
+  g.setTransform(S.scale*DPR, 0, 0, S.scale*DPR, 0, 0);
+  g.clearRect(0, 0, W, H);
+  drawChassis(); drawHeader(); drawLeft(); drawToolbar(); drawEditor(); drawEditorFooter(); drawLibrary(); drawRight(); drawFooter();
+  drawPresetBrowser(); drawMenu();
+  ui.live = ui.regions;
+}
+function setScale(s) { S.scale = s; const sel = document.getElementById('devScale'); if ([...sel.options].some(o => o.value === String(s))) sel.value = String(s); resize(); }
+
+// =============================================================================================
+// 12. Boot: fonts, images, URL states
+// =============================================================================================
+const ASSETS = window.KICK_ASSETS, IMG = {};
+async function boot() {
+  const b64 = s => Uint8Array.from(atob(s), c => c.charCodeAt(0)).buffer;
+  const faces = [new FontFace(FONT.sc, b64(ASSETS.fonts['KickSC-Medium']), { weight: '500' }), new FontFace(FONT.sc, b64(ASSETS.fonts['KickSC-SemiBold']), { weight: '620' }),
+    new FontFace(FONT.exp, b64(ASSETS.fonts['KickExp-SemiBold']), { weight: '600' })];
+  for (const f of faces) { await f.load(); document.fonts.add(f); }
+  await Promise.all(Object.entries(ASSETS.images).map(([k, src]) => new Promise(res => { const im = new Image(); im.onload = () => { IMG[k] = im; res(); }; im.src = src; })));
+  const q = new URLSearchParams(location.search);
+  if (q.get('scale')) S.scale = parseFloat(q.get('scale'));
+  if (q.get('shot')) { document.body.classList.add('shot'); applyShot(q.get('shot')); S.shotFrames = 8; }
+  if (q.get('freeze')) S.freeze = parseFloat(q.get('freeze'));
+  resize();
+  document.getElementById('devScale').value = String(S.scale);
+  document.getElementById('devScale').onchange = e => setScale(parseFloat(e.target.value));
+  document.getElementById('devPlay').onclick = e => { S.hostPlaying = !S.hostPlaying; e.target.textContent = S.hostPlaying ? 'Host: playing' : 'Host: stopped'; };
+  document.getElementById('devShot').onclick = () => { const a = document.createElement('a'); a.download = 'kickarse.png'; a.href = cv.toDataURL('image/png'); a.click(); };
+  // warm up the waveform history so first paint is populated
+  const warm = S.freeze; S.freeze = null; for (let i = 0; i < 160; i++) engineStep(1/60); S.freeze = warm;
+  if (q.get('shot')) { applyShotLate(q.get('shot')); }
+  if (q.get('test')) { window.__frozen = true; S.freeze = 0.3; draw(); await selfTest(); return; }
+  requestAnimationFrame(frame);
+}
+// ---------------------------------------------------------------------------------------------
+// Self-test (?test=1): drives the real event listeners with synthetic input and checks the model.
+// It doubles as an executable description of the interaction spec (DESIGN.md §9).
+async function selfTest() {
+  const log = []; const out = document.createElement('pre'); out.id = 'log'; document.body.appendChild(out);
+  const b = () => cv.getBoundingClientRect();
+  const ev = (type, x, y, o = {}) => { const r = b(); cv.dispatchEvent(new MouseEvent(type, { bubbles: true, clientX: r.left + x*S.scale, clientY: r.top + y*S.scale, button: 0, ...o })); };
+  const up = (x, y, o = {}) => { const r = b(); window.dispatchEvent(new MouseEvent('mouseup', { clientX: r.left + x*S.scale, clientY: r.top + y*S.scale, ...o })); };
+  const key = (k, o = {}) => cv.dispatchEvent(new KeyboardEvent('keydown', { key: k, bubbles: true, ...o }));
+  const redraw = () => draw();
+  const reg = id => ui.live.find(r => r.id === id);
+  const centre = id => { const r = reg(id); if (!r) throw new Error('no region ' + id); return [r.x + r.w/2, r.y + r.h/2]; };
+  const click = (id, o = {}) => { redraw(); const [x, y] = centre(id); ev('mousemove', x, y, o); ev('mousedown', x, y, o); up(x, y, o); redraw(); ui.lastClick = { id: null, t: 0 }; };
+  const dbl = (x, y) => { redraw(); ev('mousemove', x, y); ev('mousedown', x, y); up(x, y); ev('mousedown', x, y); up(x, y); redraw(); ui.lastClick = { id: null, t: 0 }; };
+  const drag = (x0, y0, x1, y1, o = {}, steps = 6) => { redraw(); ev('mousemove', x0, y0, o); ev('mousedown', x0, y0, o);
+    for (let i = 1; i <= steps; i++) ev('mousemove', lerp(x0, x1, i/steps), lerp(y0, y1, i/steps), o); up(x1, y1, o); redraw(); ui.lastClick = { id: null, t: 0 }; };
+  const check = (name, cond, extra = '') => log.push(`${cond ? 'PASS' : 'FAIL'}  ${name}${extra ? '  (' + extra + ')' : ''}`);
+  const env = () => curEnv();
+  try {
+    P.depth = 50; drag(980, 150, 980, 100); check('knob: vertical drag raises Depth', Math.abs(P.depth - (50 + 50/260*100)) < 0.6, P.depth.toFixed(1));
+    const d1 = P.depth; drag(980, 150, 980, 140, { shiftKey: true }); check('knob: Shift = fine (x0.1)', Math.abs(P.depth - (d1 + 10/260*10)) < 0.2, P.depth.toFixed(2));
+    dbl(980, 150); check('knob: double-click resets to default', P.depth === 100);
+    P.depth = 30; click('depth', { ctrlKey: true }); check('knob: Ctrl-click resets', P.depth === 100);
+    click('depth', { altKey: true }); for (const c of '42') key(c); key('Enter'); check('knob: Alt-click opens type-in, Enter commits', P.depth === 42, String(P.depth));
+    click('depthV:v'); key('7'); key('5'); key('Escape'); check('value text: click types, Esc cancels', P.depth === 42);
+    click('mode:3'); check('mode segmented: Spectral', P.mode === 3);
+    click('mode:0');
+    click('multi'); check('Split lamp toggles multiband', P.multi === 1); click('multi');
+    const n0 = env().n.length, xs0 = env().n.map(o => o.x); dbl(X(0.85), Y(0.45)); check('editor: double-click empty adds a node (snapped)', env().n.length === n0 + 1, `${n0} -> ${env().n.length}`);
+    const added = env().n.findIndex(o => !xs0.includes(o.x)); const nodeObj = env().n[added];
+    const [nx, ny] = nodeScreen(env(), phaseMap(), added); const x0 = nodeObj.x, y0 = nodeObj.y;
+    drag(nx, ny, nx + 40, ny + 30); check('editor: drag with Snap keeps x on the grid', nodeObj.x === x0 && nodeObj.y < y0, `x ${x0.toFixed(3)} -> ${nodeObj.x.toFixed(3)}, y ${y0.toFixed(2)} -> ${nodeObj.y.toFixed(2)}`);
+    { const [mx, my] = nodeScreen(env(), phaseMap(), env().n.indexOf(nodeObj)); drag(mx, my, mx + 40, my, { ctrlKey: true }); check('editor: Ctrl-drag moves off-grid', Math.abs(nodeObj.x - (x0 + 40/PW)) < 0.004, nodeObj.x.toFixed(3)); }
+    { const i = env().n.indexOf(nodeObj), was = nodeObj.qs; click('editor'); redraw(); const [mx, my] = nodeScreen(env(), phaseMap(), i); ev('mousemove', mx, my, { ctrlKey: true }); ev('mousedown', mx, my, { ctrlKey: true }); up(mx, my, { ctrlKey: true }); redraw(); ui.lastClick = { id: null, t: 0 };
+      check('editor: Ctrl-click toggles quick-shift membership', nodeObj.qs === !was); }
+    const a = env().n[0], bn = env().n[1]; const qm = (a.x + bn.x)/2, t0 = a.t;
+    drag(X(qm), Y(env().evaluate(qm)), X(qm), Y(env().evaluate(qm)) - 40); check('editor: dragging a segment bends it (tension)', env().n[0].t !== t0, `${t0.toFixed(2)} -> ${env().n[0].t.toFixed(2)}`);
+    drag(X(0.5), PY + 4, X(0.99), PY + PH - 4); check('editor: marquee selects nodes', S.sel.size >= 1, `${S.sel.size} selected`);
+    const before = env().n.length; key('Delete'); check('editor: Delete removes selected (endpoints stay)', env().n.length < before && env().n[env().n.length-1].x === 1, `${before} -> ${env().n.length}`);
+    key('z', { ctrlKey: true }); check('undo restores', env().n.length === before);
+    key('z', { ctrlKey: true, shiftKey: true }); check('redo re-applies', env().n.length < before);
+    const r0 = Math.round(P.rate); click('rNext'); check('rate stepper next', Math.round(P.rate) === r0 + 1);
+    click('rVal'); check('rate value opens the note grid', S.menu && S.menu.id === 'rate'); click('rt9'); check('rate grid pick 1/8', Math.round(P.rate) === 9 && !S.menu);
+    click('thSidechain:3'); S.morph = null; redraw(); check('library click applies a shape', sameShape(SHAPES.Sidechain[3], env()));
+    const qsBefore = env().n.filter(o => o.qs).map(o => o.x); const [qx, qy] = centre('qsBar'); drag(qx, qy, qx + 40, qy);
+    const qsAfter = env().n.filter(o => o.qs).map(o => o.x);
+    check('quick shift bar moves the group together', qsAfter.every((v, i) => v > qsBefore[i]) && Math.abs((qsAfter[0]-qsBefore[0]) - (qsAfter[1]-qsBefore[1])) < 1e-6, `${qsBefore.map(v=>v.toFixed(3))} -> ${qsAfter.map(v=>v.toFixed(3))}`);
+    click('tool1'); drag(X(0.1), Y(0.2), X(0.4), Y(0.8));
+    check('line tool (snapped) replaces the span with a straight segment', env().n.some(o => o.x === 0.5 && Math.abs(o.y - 0.8) < 0.01) && env().n.every(o => o.x === 0 || o.x >= 0.5), env().n.map(o => o.x.toFixed(3)).join(' '));
+    S.snap = false; drag(X(0.6), Y(0.3), X(0.9), Y(0.7));
+    check('line tool (free) inserts end points where drawn', env().n.some(o => Math.abs(o.x - 0.6) < 0.004) && env().n.some(o => Math.abs(o.x - 0.9) < 0.004), env().n.map(o => o.x.toFixed(3)).join(' ')); S.snap = true;
+    click('tool2'); redraw(); ev('mousemove', X(0.5), Y(0.9)); ev('mousedown', X(0.5), Y(0.9)); for (let i = 1; i <= 30; i++) ev('mousemove', X(0.5 + i*0.01), Y(0.5 + 0.4*Math.cos(i/3))); up(X(0.8), Y(0.5)); redraw();
+    check('pencil draws and simplifies into nodes', env().n.filter(o => o.x > 0.49 && o.x < 0.81).length >= 3, `${env().n.length} nodes`);
+    click('tool0');
+    click('mode:2'); const th0 = P.threshold; const [tx, ty] = centre('thr'); drag(tx, ty, tx + 30, ty); check('threshold meter drag', P.threshold > th0, `${th0} -> ${P.threshold.toFixed(1)}`);
+    click('mode:0'); P.multi = 1; redraw(); const xo = P.crossover; const [cx, cy] = centre('xover'); drag(cx, cy, cx + 30, cy); check('crossover drag is relative (+30 px = x1000^(30/160))', Math.abs(P.crossover - xo*Math.pow(1000, 30/160)) < 2, `${xo} -> ${P.crossover.toFixed(0)}`); P.multi = 0;
+    const pr = S.preset; click('pNext'); check('preset next', S.preset === (pr + 1) % PRESETS.length && !S.dirty);
+    click('pBrowse'); check('preset browser opens', S.overlay === 'presets'); key('Escape'); check('Esc closes overlays', !S.overlay);
+    { const e2 = env(); S.sel = new Set([1]); const y1 = e2.n[1].y; key('ArrowUp'); check('arrow keys nudge selected nodes', Math.abs(e2.n[1].y - Math.min(1, y1 + 0.01)) < 1e-6); S.sel.clear(); }
+    S.dirty = true; key('s', { ctrlKey: true }); check('Ctrl+S saves (clears dirty)', !S.dirty);
+    click('rec'); check('capture arms', S.rec === 1); click('rec'); check('capture cancels', S.rec === 0);
+    S.rec = 1; recTick(true); for (let i = 1; i <= 100; i++) { B.phase = i/100; recTick(false); } check('capture completes into a new User shape', S.rec === 0 && S.capturedFlash === 1 && SHAPES.User.length >= 3);
+  } catch (e) { log.push('ERROR ' + e.message + '\n' + e.stack); }
+  const fails = log.filter(l => !l.startsWith('PASS')).length;
+  out.textContent = `SELFTEST ${fails ? 'FAILED' : 'OK'} ${log.length - fails}/${log.length}\n` + log.join('\n');
+  document.title = fails ? 'selftest-failed' : 'selftest-ok';
+}
+function applyShot(name) {
+  // deterministic states used by tools/…/screenshots: see docs/design/DESIGN.md §12
+  const set = (o) => Object.assign(P, o);
+  S.dirty = true;
+  switch (name) {
+    case 'sync': break;
+    case 'midi': set({ mode: 1 }); break;
+    case 'audio': set({ mode: 2, trigFilter: 1 }); break;
+    case 'spectral': set({ mode: 3, trigSource: 0 }); break;
+    case 'ring': set({ mode: 4, trigSource: 1 }); break;
+    case 'multi': set({ multi: 1, envLink: 0, crossover: 180 }); S.editBand = 1; break;
+    case 'presets': S.overlay = 'presets'; break;
+    case 'rate': S.menu = { id: 'rate', x: 16, y: 118 }; break;
+    case 'depth60': set({ depth: 62 }); break;
+    case 'edit': S.sel = new Set([1, 2]); break;
+    case 'oneshot': set({ mode: 2, playMode: 1 }); break;
+    case 'entry': S.entry = { k: 'depth', text: '75', all: false }; break;
+    case 'menu': S.menu = { x: 986, y: 38, items: settingsMenu(), right: 1064, id: 'settings' }; break;
+    case 'hover': break;
+    case 'ms': set({ timeMode: 1, lengthMs: 180, grid: 2, swing: 40 }); break;
+  }
+}
+function applyShotLate(name) {
+  if (name === 'record') { S.rec = 2; S.recProgress = 0.46; S.recBuf = new Float32Array(256); }
+  if (name === 'hover') { ui.hot = 'thSidechain:6'; S.hint = 'Duck 7 — hover previews in the editor, click to apply, right-click for favourite'; }
+  if (name === 'edit') { ed.hoverSeg = 1; ed.readout = { x: X(0.21), y: Y(0.55), s: '101.6 ms   −5.2 dB' }; S.hint = 'Drag nodes · drag a segment to bend · double-click to add/delete · drag empty space to select · Ctrl-click = quick-shift group'; }
+}
+boot();
+</script>
+</body>
+</html>

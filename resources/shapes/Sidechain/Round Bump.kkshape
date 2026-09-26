@@ -1,0 +1,5 @@
+# Kickarse shape
+version=1
+name=Round Bump
+category=Sidechain
+env=KE1 0,0.5,0.3,0;0.4,0.85,-0.3,0;0.7,1,0,0;1,1,0,0

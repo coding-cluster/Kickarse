@@ -1,0 +1,9 @@
+# Kickarse preset
+version=1
+name=Spectral Bass Carve
+category=Spectral
+author=Kickarse
+param.mode=Spectral
+param.spec_attack=2
+param.spec_release=80
+param.spec_range=18

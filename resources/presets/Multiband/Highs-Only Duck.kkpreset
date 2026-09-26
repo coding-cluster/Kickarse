@@ -1,0 +1,10 @@
+# Kickarse preset
+version=1
+name=Highs-Only Duck
+category=Multiband
+author=Kickarse
+param.multi=1
+param.crossover=800
+param.lo_mix=0
+param.hi_mix=100
+param.slope=12 dB/oct

@@ -1,0 +1,9 @@
+# Kickarse preset
+version=1
+name=Delta Listen FX
+category=Creative
+author=Kickarse
+param.delta=1
+param.mode=Sync
+param.rate=1/8
+param.depth=100

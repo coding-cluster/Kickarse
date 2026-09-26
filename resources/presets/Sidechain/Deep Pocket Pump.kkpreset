@@ -1,0 +1,10 @@
+# Kickarse preset
+version=1
+name=Deep Pocket Pump
+category=Sidechain
+author=Kickarse
+param.mode=Sync
+param.rate=1/8
+param.depth=80
+param.smooth=20
+state.envA=KE1 0,0,0.3,0;0.6,1,-0.2,0;1,1,0,0

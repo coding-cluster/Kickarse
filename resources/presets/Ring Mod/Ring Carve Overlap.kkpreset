@@ -1,0 +1,8 @@
+# Kickarse preset
+version=1
+name=Ring Carve Overlap
+category=Ring Mod
+author=Kickarse
+param.mode=Ring Mod
+param.ring_attack=0.05
+param.ring_release=2

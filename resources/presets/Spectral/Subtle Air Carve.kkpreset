@@ -1,0 +1,10 @@
+# Kickarse preset
+version=1
+name=Subtle Air Carve
+category=Spectral
+author=Kickarse
+param.mode=Spectral
+param.spec_range=8
+param.spec_sens=30
+param.spec_attack=5
+param.spec_release=150

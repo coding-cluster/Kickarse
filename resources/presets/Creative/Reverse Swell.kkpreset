@@ -1,0 +1,8 @@
+# Kickarse preset
+version=1
+name=Reverse Swell
+category=Creative
+author=Kickarse
+param.mode=Sync
+param.rate=1/2
+state.envA=KE1 0,1,0,0;1,0,0,0
