@@ -700,16 +700,28 @@ GrMeter::GrMeter(Services& s, RectF rect) : Widget(s) { r = rect; }
 
 void GrMeter::paint(Gfx& g)
 {
-    const float gr = std::clamp(-sv.live().grDb, 0.f, 36.f);
-    g.fillRR(r.x, r.y, r.w, 5.f, 1.f, col::ink0);
-    if (gr > 0.01f)
-        g.fillRR(r.x + r.w - r.w * gr / 36.f, r.y, r.w * gr / 36.f, 5.f, 1.f, col::duck);
+    // Readout on top, a 10 px bar (fills right to left, 6 dB ticks), end labels below: large enough
+    // to read at a glance from across the room.
+    constexpr float kRange = 36.f;
+    const float gr = std::clamp(-sv.live().grDb, 0.f, kRange);
+    const bool on = gr >= 0.05f;
+    g.text("GR", r.x, r.y + 6.5f, {10.5f, Font::Sc, col::textMute, Align::Left});
     char buf[32];
-    if (gr < 0.05f)
-        std::snprintf(buf, sizeof(buf), "GR 0.0");
+    if (on)
+        std::snprintf(buf, sizeof(buf), "\xE2\x88\x92%.1f", double(gr));
     else
-        std::snprintf(buf, sizeof(buf), "GR \xE2\x88\x92%.1f", double(gr));
-    g.text(buf, r.right(), r.y + 15.f, {10.f, Font::Sc, col::textDim, Align::Right});
+        std::snprintf(buf, sizeof(buf), "0.0");
+    g.text(buf, r.right(), r.y + 6.5f, {12.5f, Font::ScSemi, on ? col::duck : col::textMute, Align::Right});
+    const float by = r.y + 16.f, bh = 10.f;
+    g.fillRR(r.x, by, r.w, bh, 2.f, col::ink0);
+    if (gr > 0.01f)
+        g.fillRR(r.x + r.w - r.w * gr / kRange, by, r.w * gr / kRange, bh, 2.f, col::duck);
+    for (float db = 6.f; db < kRange; db += 6.f) {
+        const float tx = std::round(r.right() - r.w * db / kRange) + 0.5f;
+        g.line(tx, by + 1.f, tx, by + bh - 1.f, col::ink0.withAlpha(0.55f), 1.f);
+    }
+    g.text("36", r.x, r.y + 33.f, {9.5f, Font::Sc, col::textDim, Align::Left});
+    g.text("0", r.right(), r.y + 33.f, {9.5f, Font::Sc, col::textDim, Align::Right});
 }
 
 }} // namespace kick::ui

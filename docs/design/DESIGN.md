@@ -150,7 +150,7 @@ The controls themselves are serious: no mascots, no novelty knobs, no jokes on l
 | "Output" title | y = 566 |
 | Delta lamp | (998, 556, 66, 22) |
 | Gain knob centre | (918, 598); value text at (946, 592), "gain" at (946, 606) |
-| GR meter | (998, 592, 66, 5); caption right-aligned at y = 607 |
+| GR meter | (998, 586, 66, 40): readout at y = 592.5, 10 px bar at y = 602, end labels at y = 619 |
 
 **Footer.** Hint text at (16, centre-y 646.5), 10.5 px. UI-size button (994, 636, 60, 20),
 text right-aligned at 1040 with a caret at 1047. Resize grip (1058, 636, 22, 24), glyph at
@@ -183,8 +183,8 @@ If a new element beats (2) in the squint test, it is too loud.
 | `ink5` | `#2F2E2B` | selected segment key, selected list row, dividers in wells |
 | `ink6` | `#3A3935` | knob track, menu border, slider cap |
 | `ink7` | `#4A4843` | minor scale ticks, inactive graph lines, hovered slider cap |
-| `textDim` | `#7E7A72` | tertiary: help copy, axis ticks, captions (never needed to operate) |
-| `textMute` | `#99958B` | labels, section titles, idle icons |
+| `textDim` | `#9E998F` | tertiary: help copy, axis ticks, captions (never needed to operate) |
+| `textMute` | `#B5B0A5` | labels, section titles, idle icons |
 | `text` | `#D5D0C5` | values, neutral knob arcs, idle key text on hover |
 | `textHi` | `#F2EEE4` | active and selected text, pointers, emphasis |
 
@@ -256,15 +256,17 @@ Grain opacity **0.16** (§5.1). The only colour gradients in the product are:
 
 | Foreground | on chassis `#1F1E1C` | on well `ink1` | on key `ink4` | on selected `ink5` |
 |---|---|---|---|---|
-| `textDim` | 3.9 | 4.4 | 3.6 | 3.2 |
-| `textMute` | 5.6 | 6.3 | 5.1 | 4.5 |
+| `textDim` | 5.9 | 6.6 | 5.4 | 4.8 |
+| `textMute` | 7.7 | 8.7 | 7.1 | 6.3 |
 | `text` | 10.8 | 12.2 | 10.0 | 8.8 |
 | `textHi` | 14.4 | 16.2 | 13.2 | 11.7 |
 | `duck` | 9.6 | 10.8 | 8.8 | 7.8 |
 | `high` | 7.1 | 8.0 | 6.6 | 5.8 |
 | `kick` | 5.0 | 5.6 | 4.6 | 4.1 |
 
-All labels and values meet AA (4.5:1). All operative graphics (arcs, curves, handles) meet the
+All text, including `textDim` captions and axis labels, meets AA (4.5:1) on every surface; the
+two secondary tones were lifted after early testers found them hard to read on cheaper monitors
+and in bright rooms. All operative graphics (arcs, curves, handles) meet the
 3:1 non-text rule. `textDim` is reserved for non-essential text ≥ 9.5 px. Knob tracks (`ink6`)
 are deliberately low; the value arc carries the information.
 
@@ -649,8 +651,9 @@ Settings → Hint line. There are no pop-up tooltips.
 
 **Spectral display** (212 × 84). See §8.4.
 
-**GR meter.** 66 × 5 trough `ink0`, fill `duck` from the right edge leftwards over 0–36 dB,
-caption "GR −4.2" in 10 px `textDim`.
+**GR meter.** "GR" label (10.5 px `textMute`) and the value right-aligned above the bar
+(12.5 px/620, `duck` while reducing, `textMute` at 0). 66 × 10 trough `ink0`, fill `duck` from the
+right edge leftwards over 0–36 dB with ticks every 6 dB; end labels "36" / "0" in 9.5 px `textDim`.
 
 ---
 
@@ -1159,13 +1162,11 @@ is ignored).
     drags to at most 30 Hz, and always send on mouse-up.
 * `uiIdle()` (about 60 Hz, DPF-driven) reads `Engine::bridge()` via
   `getPluginInstancePointer()`.
-  * Repaint when:
-    * the phase moved more than 0.5 px,
-    * `triggerCount` or `recState` changed,
-    * a spectral or wave frame is due (in Spectral mode, or when waveforms are shown and the
-      host is playing),
-    * any animation is running (hover, morph, flash), or
-    * the model is dirty.
+  * Repaint right away when any animation is running (hover, morph, flash), the model changed
+    or something asked for a repaint (input, edits).
+  * Repaint at most 30 times a second (`View::kAmbientFps`) when a live display moved since
+    the last paint (`View::liveMoved`: phase by more than ~0.1 px, a level by 0.05 dB, a wave
+    bin by 0.2 %, `recState`, notes, transport), a text caret blinks, or a status fades.
   * Otherwise skip painting, so an idle, stopped host costs almost nothing.
   * Copy the waveform and spectral arrays once per idle into UI-owned buffers (relaxed loads)
     and apply display smoothing there.

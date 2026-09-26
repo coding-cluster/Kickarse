@@ -32,8 +32,8 @@ inline constexpr Rgba ink4     = hex(0x262523);
 inline constexpr Rgba ink5     = hex(0x2F2E2B);
 inline constexpr Rgba ink6     = hex(0x3A3935);
 inline constexpr Rgba ink7     = hex(0x4A4843);
-inline constexpr Rgba textDim  = hex(0x7E7A72);
-inline constexpr Rgba textMute = hex(0x99958B);
+inline constexpr Rgba textDim  = hex(0x9E998F);
+inline constexpr Rgba textMute = hex(0xB5B0A5);
 inline constexpr Rgba text     = hex(0xD5D0C5);
 inline constexpr Rgba textHi   = hex(0xF2EEE4);
 // semantic hues: duck = the envelope / amount of ducking, high = the high band, kick = sidechain

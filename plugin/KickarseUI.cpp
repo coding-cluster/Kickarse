@@ -129,8 +129,6 @@ public:
         if (shot != nullptr)
             fView->applyDebugState(shot);
 
-        const double host = getScaleFactor();
-        setGeometryConstraints(uint(kick::ui::kBaseW * host), uint(kick::ui::kBaseH * host), true);
         fUserScale = std::fmin(2.f, std::fmax(1.f, userScale));
         applySize();
         fLastIdle = nowSeconds();
@@ -156,6 +154,9 @@ public:
         applySize();
     }
     float winUserScale() const override { return fUserScale; }
+    // Embedded windows only get keys once they hold the focus; without this, typing into a text
+    // field (e.g. a new preset's name) went to the host.
+    void winGrabKeyboard() override { getWindow().focus(); }
 
 protected:
     // -- DSP/Plugin callbacks -------------------------------------------------------------------
@@ -173,6 +174,8 @@ protected:
         kick::Bridge* bridge = nullptr;
         if (auto* plugin = static_cast<KickarsePlugin*>(getPluginInstancePointer()))
             bridge = &plugin->engine().bridge();
+        if (fSizeChecks > 0 && fFrames > 0)
+            enforceUserSize();
         if (fView->idle(bridge, dt) || !fSnapshotPath.empty() || fFrames < 12)
             repaint();
     }
@@ -250,10 +253,27 @@ private:
 #endif
     }
 
+    uint wantedWidth() const { return uint(std::lround(kick::ui::kBaseW * getScaleFactor() * double(fUserScale))); }
+
+    // Hosts size the editor frame before the UI exists, from DISTRHO_UI_DEFAULT_WIDTH/HEIGHT and
+    // (often) without the display scale factor, then apply that size after we asked for ours, so
+    // the editor opened smaller than the same "100 %" picked later from the menu. Once the window
+    // is up, check the size a few times and ask again when it does not match the saved UI size.
+    void enforceUserSize()
+    {
+        --fSizeChecks;
+        const uint w = wantedWidth();
+        if (getWindow().getWidth() + 1 < w || getWindow().getWidth() > w + 1)
+            applySize();
+    }
+
     void applySize()
     {
-        const double f = getScaleFactor() * double(fUserScale);
-        const uint w = uint(std::lround(kick::ui::kBaseW * f)), h = uint(std::lround(kick::ui::kBaseH * f));
+        const double host = getScaleFactor();
+        // the minimum follows the display scale factor, which some hosts only announce after opening
+        setGeometryConstraints(uint(std::lround(kick::ui::kBaseW * host)), uint(std::lround(kick::ui::kBaseH * host)), true);
+        const double f = host * double(fUserScale);
+        const uint w = wantedWidth(), h = uint(std::lround(kick::ui::kBaseH * f));
         setSize(w, h);
         // When the host announces a scale factor, DPF creates the window already scaled; setSize then
         // changes nothing, no configure event arrives and the widget keeps its unscaled size. NanoVG and
@@ -296,6 +316,7 @@ private:
     DGL_NAMESPACE::MouseCursor fCursor = DGL_NAMESPACE::kMouseCursorArrow;
     std::string fSnapshotPath;
     int    fFrames = 0;
+    int    fSizeChecks = 8;   // idle ticks after the first paint that re-assert the saved size
 
     DISTRHO_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(KickarseUI)
 };

@@ -28,6 +28,7 @@ public:
     virtual void winSetCursor(DGL_NAMESPACE::MouseCursor c) = 0;
     virtual void winSetUserScale(float s) = 0;   // resize the window to 1080·s·host × 660·s·host
     virtual float winUserScale() const = 0;
+    virtual void winGrabKeyboard() {}   // take keyboard focus from the host (text entry)
 };
 
 struct Resources {
@@ -137,6 +138,8 @@ private:
     void    pollBridge(Bridge* bridge, double dt);
     void    handleCapture(Bridge* bridge);
     void    finishCapture(const float* buf, int bins);
+    void    saveUserPreset(const std::string& name, bool overwrite);
+    static bool liveMoved(const Live& a, const Live& b);
 
     HostIO&      host_;
     WindowHost&  win_;
@@ -180,15 +183,23 @@ private:
         std::string text;
         bool selectAll = true;
         float cx = 0.f, cy = 0.f, width = 0.f;
+        RectF box;                // where the field was last drawn: clicks inside it edit, not commit
         std::function<void(const std::string&)> commit;
     } entry_;
 
+    // Live displays, blinking carets and fades repaint at most this often; interaction is immediate.
+    static constexpr double kAmbientFps = 30.0;
+
     double clock_ = 0.0;
     bool   dirty_ = true;
+    Live   painted_;              // live_ as of the last paint, to skip repaints nothing would change
+    double paintedAt_ = -1.0;
+    bool   paintedCaretOn_ = false;
     std::uint32_t lastRevision_ = 0;
     std::uint32_t lastTrig_ = 0, lastNotes_ = 0;
     bool   firstPoll_ = true;
     float  savedFlash_ = 0.f;
+    std::string saveMsg_ = "Saved";   // header status next to Save: "Saved", "Name taken", ...
     std::string clipboard_;
     bool   hasClip_ = false;
     float  clipValue_ = 0.f;
