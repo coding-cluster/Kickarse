@@ -29,11 +29,12 @@ bool sameEnvelope(const Envelope& a, const Envelope& b)
     return true;
 }
 
-void thumbCurve(Gfx& g, const Envelope& e, float x, float y, float w, float h, const Rgba& c, float fillA)
+// v: ShapeBank::kThumbPoints envelope values, sampled once per shape (see ShapeBank::refresh)
+void thumbCurve(Gfx& g, const float* v, float x, float y, float w, float h, const Rgba& c, float fillA)
 {
     auto& vg = g.vg();
-    constexpr int N = 48;
-    auto pt = [&](int i) { const float q = float(i) / float(N); return std::pair<float, float>(x + q * w, y + (1.f - e.evaluateLeft(q)) * h); };
+    constexpr int N = ShapeBank::kThumbPoints - 1;
+    auto pt = [&](int i) { const float q = float(i) / float(N); return std::pair<float, float>(x + q * w, y + (1.f - v[i]) * h); };
     vg.beginPath();
     for (int i = 0; i <= N; ++i) {
         const auto [px, py] = pt(i);
@@ -81,6 +82,10 @@ void ShapeBank::refresh()
     loadedTab_ = tab;
     hover_ = -1;
     editor_.setPreview(nullptr);
+    thumbs_.resize(items_.size());
+    for (std::size_t i = 0; i < items_.size(); ++i)
+        for (int k = 0; k < kThumbPoints; ++k)
+            thumbs_[i][std::size_t(k)] = items_[i].env.evaluateLeft(float(k) / float(kThumbPoints - 1));
 }
 
 int ShapeBank::pageCount() const
@@ -210,7 +215,7 @@ void ShapeBank::paint(Gfx& g)
         if (hv > 0.01f)
             g.fillRR(cx + 3.f, cy + 3.f, kCw - 6.f, kCh - 6.f, 2.f, col::warm.withAlpha(0.04f * hv));
         const Rgba c = isCur ? col::duck : mix(col::textMute, col::textHi, hv);
-        thumbCurve(g, e.env, cx + 10.f, cy + 10.f, kCw - 20.f, kCh - 20.f, c, isCur ? 0.10f : 0.035f + 0.04f * hv);
+        thumbCurve(g, thumbs_[std::size_t(first + j)].data(), cx + 10.f, cy + 10.f, kCw - 20.f, kCh - 20.f, c, isCur ? 0.10f : 0.035f + 0.04f * hv);
         if (isCur)
             g.fillRR(cx + 10.f, cy + kCh - 5.f, kCw - 20.f, 2.f, 1.f, col::duck);
         if (sv.settings().favouriteShapes.count(e.id))

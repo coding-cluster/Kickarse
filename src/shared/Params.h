@@ -180,4 +180,12 @@ inline constexpr const char* kStatePreset    = "presetName";
 // Spectral filterbank size (shared so the UI can draw one bar per band)
 inline constexpr int kSpecBands = 24;
 
+// Smooth: a one-pole low-pass on the envelope value, time constant 0–20 ms, quadratic in
+// smooth01 = Smooth % / 100. Shared so the editor's smoothed-curve overlay matches the DSP.
+inline constexpr float kMaxEnvSmoothMs = 20.f;
+inline constexpr double envSmoothMs(float smooth01) noexcept
+{
+    return double(kMaxEnvSmoothMs) * double(smooth01) * double(smooth01);
+}
+
 } // namespace kick

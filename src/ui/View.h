@@ -139,7 +139,8 @@ private:
     void    handleCapture(Bridge* bridge);
     void    finishCapture(const float* buf, int bins);
     void    saveUserPreset(const std::string& name, bool overwrite);
-    static bool liveMoved(const Live& a, const Live& b);
+    static bool liveMoved(const Live& a, const Live& b, bool atRest);
+    bool    envelopeAtRest() const;   // Sync mode, host stopped: the editor shows no playhead
 
     HostIO&      host_;
     WindowHost&  win_;

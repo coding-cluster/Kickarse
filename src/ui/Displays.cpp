@@ -421,14 +421,24 @@ void CrossoverGraph::paint(Gfx& g)
     const float top = r.y + 12.f, bot = r.bottom() - 4.f, fc = m.value(kParamCrossover);
     const float ord = m.ivalue(kParamSlope) == kSlope24 ? 4.f : 2.f;
     const int solo = m.ivalue(kParamBandSolo);
+    if (fc != curveFc_ || ord != curveOrd_) {
+        curveFc_ = fc;
+        curveOrd_ = ord;
+        for (int band = 0; band < 2; ++band) {
+            curveY_[band].clear();
+            for (float px = r.x; px <= r.right() + 0.01f; px += 1.5f) {
+                const float f = 20.f * std::pow(1000.f, std::clamp((px - r.x - 4.f) / (r.w - 8.f), 0.f, 1.f));
+                const float rr = std::pow(f / fc, ord);
+                const float mm = band ? rr / (1.f + rr) : 1.f / (1.f + rr);
+                curveY_[band].push_back(lerpf(bot, top, std::pow(mm, 0.6f)));
+            }
+        }
+    }
     auto curve = [&](int band) {
         vg.beginPath();
-        for (float px = r.x; px <= r.right() + 0.01f; px += 1.5f) {
-            const float f = 20.f * std::pow(1000.f, std::clamp((px - r.x - 4.f) / (r.w - 8.f), 0.f, 1.f));
-            const float rr = std::pow(f / fc, ord);
-            const float mm = band ? rr / (1.f + rr) : 1.f / (1.f + rr);
-            const float yy = lerpf(bot, top, std::pow(mm, 0.6f));
-            if (px == r.x) vg.moveTo(px, yy); else vg.lineTo(px, yy);
+        float px = r.x;
+        for (std::size_t i = 0; i < curveY_[band].size(); ++i, px += 1.5f) {
+            if (i == 0) vg.moveTo(px, curveY_[band][i]); else vg.lineTo(px, curveY_[band][i]);
         }
     };
     for (int band = 0; band < 2; ++band) {
@@ -540,12 +550,15 @@ void BarView::paint(Gfx& g)
             p = 1.f;
         return iy + (1.f - env.evaluateLeft(map.toNode(p))) * ih;
     };
+    float ys[N + 1];   // evaluated once, used by the fill and the stroke
+    for (int i = 0; i <= N; ++i)
+        ys[i] = yAt(i);
     vg.save();
     vg.scissor(ix, iy - 2.f, iw, ih + 4.f);
     vg.beginPath();
     for (int i = 0; i <= N; ++i) {
         const float px = ix + iw * float(i) / float(N);
-        if (i == 0) vg.moveTo(px, yAt(i)); else vg.lineTo(px, yAt(i));
+        if (i == 0) vg.moveTo(px, ys[i]); else vg.lineTo(px, ys[i]);
     }
     vg.lineTo(ix + iw, iy + ih);
     vg.lineTo(ix, iy + ih);
@@ -555,7 +568,7 @@ void BarView::paint(Gfx& g)
     vg.beginPath();
     for (int i = 0; i <= N; ++i) {
         const float px = ix + iw * float(i) / float(N);
-        if (i == 0) vg.moveTo(px, yAt(i)); else vg.lineTo(px, yAt(i));
+        if (i == 0) vg.moveTo(px, ys[i]); else vg.lineTo(px, ys[i]);
     }
     vg.strokeColor(Gfx::c(col::duck));
     vg.strokeWidth(1.25f);

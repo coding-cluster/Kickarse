@@ -1026,6 +1026,11 @@ void View::pollBridge(Bridge* br, double dt)
         }
         l.recState = br->recState.load(std::memory_order_acquire);
         l.recProgress = br->recProgress.load(std::memory_order_relaxed);
+        // Stopped in Sync mode the envelope free-runs (edits stay audible) but the editor shows it
+        // at rest (no playhead, no depth ring); show no gain reduction either unless something is
+        // audible, so an open editor on a stopped, silent project does not repaint at all.
+        if (envelopeAtRest() && l.outPeakDb < -90.f)
+            l.grDb = 0.f;
     }
     // threshold meter: peak hold with a 40 dB/s fall
     l.scPeakHoldDb = std::max(l.scLevelDb, l.scPeakHoldDb - 40.f * fdt);
@@ -1148,11 +1153,16 @@ bool View::idle(Bridge* bridge, double dt)
     // costs nothing), text carets only when they blink.
     const bool caretOn = std::fmod(clock_, 1.0) < 0.56;
     const bool caretDue = (entry_.open || browser_->isOpen()) && caretOn != paintedCaretOn_;
-    const bool ambient = demoMode_ || savedFlash_ > 0.f || caretDue || liveMoved(live_, painted_);
+    const bool ambient = demoMode_ || savedFlash_ > 0.f || caretDue || liveMoved(live_, painted_, envelopeAtRest());
     return ambient && clock_ - paintedAt_ >= 1.0 / kAmbientFps - 1e-3;
 }
 
-bool View::liveMoved(const Live& a, const Live& b)
+bool View::envelopeAtRest() const
+{
+    return !live_.playing && model_.ivalue(kParamMode) == kModeSync;
+}
+
+bool View::liveMoved(const Live& a, const Live& b, bool atRest)
 {
     // tolerances sit below what a paint could show at 2x (a tenth of a pixel, 0.05 dB)
     auto near = [](float x, float y, float eps) { return std::fabs(x - y) <= eps; };
@@ -1165,8 +1175,10 @@ bool View::liveMoved(const Live& a, const Live& b)
     if (a.active != b.active || a.playing != b.playing || a.timeSigNum != b.timeSigNum || a.timeSigDen != b.timeSigDen
         || a.lastNote != b.lastNote || a.lastVelocity != b.lastVelocity || a.recState != b.recState)
         return true;
-    if (!near(a.phase, b.phase, 1e-4f) || !near(a.valueA, b.valueA, 1e-3f) || !near(a.valueB, b.valueB, 1e-3f)
-        || !near(a.grDb, b.grDb, 0.05f) || !near(a.bpm, b.bpm, 0.05f) || !near(a.cycleSeconds, b.cycleSeconds, 1e-4f)
+    // at rest the playhead and the envelope value are not drawn
+    if (!atRest && (!near(a.phase, b.phase, 1e-4f) || !near(a.valueA, b.valueA, 1e-3f) || !near(a.valueB, b.valueB, 1e-3f)))
+        return true;
+    if (!near(a.grDb, b.grDb, 0.05f) || !near(a.bpm, b.bpm, 0.05f) || !near(a.cycleSeconds, b.cycleSeconds, 1e-4f)
         || !near(a.scLevelDb, b.scLevelDb, 0.05f) || !near(a.scPeakHoldDb, b.scPeakHoldDb, 0.05f)
         || !near(a.outPeakDb, b.outPeakDb, 0.05f) || !near(a.recProgress, b.recProgress, 1e-3f)
         || !near(a.trigFlash, b.trigFlash, 1e-3f) || !near(a.noteFlash, b.noteFlash, 1e-3f))
@@ -1293,13 +1305,20 @@ bool View::motion(float x, float y, unsigned mods)
     const Pointer p = pointer(x, y, mods);
     const float dx = x - lastPtr_.x, dy = y - lastPtr_.y;
     lastPtr_ = p;
+    Widget* const wasHot = hot_;
+    const std::string wasHint = hint_;
     if (active_ != nullptr) {
         active_->drag(p, dx, dy);
     } else {
         setHot(hitTest(x, y), p);
     }
     updateCursorAndHint(p);
-    repaint();
+    // Hovering must not cost a full frame per mouse event: repaint only for a drag, a new hot
+    // widget or hint, a tooltip (it follows the pointer), or a widget that draws its hover from
+    // the pointer position without reporting it.
+    const bool tooltipShown = settings_.tooltips && hot_ != nullptr && clock_ - hoverSince_ >= 0.7;
+    if (active_ != nullptr || hot_ != wasHot || hint_ != wasHint || tooltipShown || (hot_ != nullptr && hot_->repaintsOnMove()))
+        repaint();
     return true;
 }
 

@@ -140,7 +140,7 @@ public:
     void hostSetState(const char* key, const char* value) override { setState(key, value); }
 
     // -- WindowHost --------------------------------------------------------------------------
-    void winRepaint() override { repaint(); }
+    void winRepaint() override { requestRepaint(); }
     void winSetCursor(DGL_NAMESPACE::MouseCursor c) override
     {
         if (c != fCursor) {
@@ -176,8 +176,11 @@ protected:
             bridge = &plugin->engine().bridge();
         if (fSizeChecks > 0 && fFrames > 0)
             enforceUserSize();
-        if (fView->idle(bridge, dt) || !fSnapshotPath.empty() || fFrames < 12)
+        const bool wantsPaint = fView->idle(bridge, dt);
+        if (!fSnapshotPath.empty() || fFrames < 12)
             repaint();
+        else if (wantsPaint || fRepaintPending)
+            requestRepaint();
     }
 
     void onNanoDisplay() override
@@ -185,6 +188,7 @@ protected:
         const float k = scale();
         fView->paint(k);
         fLastPaint = nowSeconds();
+        fRepaintPending = false;
         ++fFrames;
         if (fFrames == 10) {
             if (const char* path = std::getenv("KICKARSE_UI_SELFTEST")) {
@@ -237,6 +241,17 @@ protected:
 
 private:
     float scale() const { return float(getWidth()) / kick::ui::kBaseW; }
+
+    // Every repaint the view asks for goes through here: at most kMaxFps paints per second, the
+    // rest is deferred to the next idle tick (16 ms). Without it each mouse event painted the whole
+    // window, so hovering the editor cost as many full frames as the mouse sent events.
+    void requestRepaint()
+    {
+        if (nowSeconds() - fLastPaint >= 1.0 / kMaxFps - 1e-4)
+            repaint();
+        else
+            fRepaintPending = true;
+    }
 
     // Windows hands out WM_TIMER (our uiIdle) and WM_PAINT only when no input is queued, so a moving
     // mouse starved both and the live displays froze while hovering. Drive the idle tick from input
@@ -313,6 +328,8 @@ private:
     float  fUserScale = 1.f;
     double fLastIdle = 0.0;
     double fLastPaint = 0.0;
+    bool   fRepaintPending = false;
+    static constexpr double kMaxFps = 60.0;
     DGL_NAMESPACE::MouseCursor fCursor = DGL_NAMESPACE::kMouseCursorArrow;
     std::string fSnapshotPath;
     int    fFrames = 0;

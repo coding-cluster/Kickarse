@@ -103,6 +103,9 @@ public:
 private:
     float f2x(float f) const;
     bool active_ = false;
+    // band responses per 1.5 px column, rebuilt only when the crossover or slope changes
+    std::vector<float> curveY_[2];
+    float curveFc_ = -1.f, curveOrd_ = -1.f;
 };
 
 class SpectrumView : public Widget {

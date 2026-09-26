@@ -779,6 +779,13 @@ When Split is on and **unlinked**:
 
 When **linked** (the default): one curve in `duck`, both tabs styled as selected, and the link
 icon lit.
+
+**Smoothed curve.** When Smooth rounds the curve by more than about a pixel, the edited band also
+gets a dotted line (1.2 px dots every 3.8 px, 1.6 px wide, band colour @ 0.9): the curve the audio
+actually follows. It runs the DSP's own one-pole (time constant `envSmoothMs`, Params.h) in real
+time over the drawn curve, resampled per pixel column, for two cycles so the start carries over
+from the previous cycle's end. It is drawn at full envelope scale (before Depth); a jump the filter
+settles within two pixel columns is not counted, so the default 10 % shows nothing.
 * Unlinking copies the current envelope to envB so nothing jumps.
 * Linking makes the high band follow envA. envB is kept but inactive; relinking doesn't delete
   it until the next save.
@@ -1163,10 +1170,17 @@ is ignored).
 * `uiIdle()` (about 60 Hz, DPF-driven) reads `Engine::bridge()` via
   `getPluginInstancePointer()`.
   * Repaint right away when any animation is running (hover, morph, flash), the model changed
-    or something asked for a repaint (input, edits).
+    or something asked for a repaint (input, edits). The adapter caps all of these at 60 paints
+    a second (`KickarseUI::requestRepaint`; the rest wait for the next idle tick).
+  * Mouse motion repaints only for a drag, a new hot widget or hint, a visible tooltip (it
+    follows the pointer), or a widget whose `repaintsOnMove()` is true. The envelope editor
+    returns false and repaints itself when its hover target changes.
   * Repaint at most 30 times a second (`View::kAmbientFps`) when a live display moved since
     the last paint (`View::liveMoved`: phase by more than ~0.1 px, a level by 0.05 dB, a wave
     bin by 0.2 %, `recState`, notes, transport), a text caret blinks, or a status fades.
+    Stopped in Sync mode the envelope free-runs in the DSP but the editor shows it at rest:
+    phase and envelope values are ignored, and the GR meter reads 0 unless the output is above
+    −90 dBFS.
   * Otherwise skip painting, so an idle, stopped host costs almost nothing.
   * Copy the waveform and spectral arrays once per idle into UI-owned buffers (relaxed loads)
     and apply display smoothing there.

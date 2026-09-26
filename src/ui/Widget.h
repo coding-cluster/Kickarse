@@ -95,6 +95,8 @@ public:
     virtual void wheel(const Pointer&, float /*notches*/) {}
     virtual void context(const Pointer&) {}
     virtual void move(const Pointer&) {}              // hover motion
+    // false: move() calls sv.repaint() itself when the hover state it draws changes
+    virtual bool repaintsOnMove() const { return true; }
     virtual void leave() {}
     virtual bool key(unsigned /*key*/, const Pointer&) { return false; }
     virtual DGL_NAMESPACE::MouseCursor cursor(const Pointer&) const { return DGL_NAMESPACE::kMouseCursorArrow; }
