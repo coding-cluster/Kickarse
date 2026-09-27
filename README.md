@@ -4,10 +4,6 @@ Sidechain / ducking plugin for Windows — VST3, VST2 and CLAP, 64-bit.
 Five modes: **Sync**, **MIDI**, **Audio**, **Spectral** (24-band inverse EQ) and **Ring** (sidechain ring modulation),
 with a drawable envelope, low/high split, Mid/Side, Delta monitoring, Quick Shift and audio → envelope capture.
 
-<p align="center">
-  <img src="screenshots/sync.png" width="780" alt="Kickarse envelope editor in Sync mode">
-</p>
-
 ## Demo
 
 <p align="center">
