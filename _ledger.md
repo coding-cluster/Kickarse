@@ -51,3 +51,18 @@ Append-only record of work done in this repository (newest last). Read it before
 - Notes: Shift+letters already worked (pugl turns WM_CHAR into text); the missing piece was a
   caret. Commit trims leading/trailing spaces (pre-existing). No clipboard yet (Ctrl+C/V/X);
   the preset browser's search field still only appends.
+
+## 09/27/2026 — Typing did nothing in the name field (host keyboard delivery)
+
+- Changed: plugin/KickarseUI.cpp — while an entry is open, a per-thread WH_GETMESSAGE hook
+  handles WM_KEYDOWN (TranslateMessage + mapped DGL key) and WM_CHAR for the plugin window and
+  turns them into WM_NULL; winReleaseKeyboard(); debugLog() for focus/hook/key events.
+  src/ui/View.* — WindowHost::winReleaseKeyboard, called on commit (before the callback) and
+  cancel; Ctrl+A ignores AltGr. src/ui/PresetBrowser.cpp — no search caret while a text entry is
+  open. docs/design/DESIGN.md §6.11.
+- Reused: JUCE's approach for plugin keyboard input on Windows (message hook), DGL key codes.
+- Verified: MinGW cross-build of Kickarse-vst3 (links; hook APIs imported; no warnings in our
+  files); harness entry test 19/19, UI self-test 28/28; screenshot of Save as… with the browser.
+  NOT verified in a host: no Windows/DAW here.
+- Notes: cause not proven on the user's machine; if typing still fails, KICKARSE_UI_DEBUGLOG
+  shows whether keys reach the hook ("hook key/char") or DPF ("dpf key/char").

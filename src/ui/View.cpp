@@ -872,7 +872,7 @@ void View::entryKey(unsigned key, const Pointer& p)
         else entryErase(e.caret, p.ctrl ? nextWord(s, e.caret) : nextCp(s, e.caret));
         return;
     default:
-        if (p.ctrl && (key == 'a' || key == 'A')) {
+        if (p.ctrl && !p.alt && (key == 'a' || key == 'A')) {   // not AltGr (Ctrl+Alt): that types
             e.anchor = 0;
             e.caret = s.size();
         }
@@ -892,6 +892,7 @@ void View::commitEntry()
         return;
     Entry e = std::move(entry_);
     entry_ = {};
+    win_.winReleaseKeyboard();   // before commit: it may open a new entry ("Name taken")
     if (e.param < 0) {
         if (e.commit) {
             std::string t = e.text;
@@ -910,6 +911,7 @@ void View::commitEntry()
 void View::cancelEntry()
 {
     entry_ = {};
+    win_.winReleaseKeyboard();
     repaint();
 }
 

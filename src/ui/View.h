@@ -28,7 +28,8 @@ public:
     virtual void winSetCursor(DGL_NAMESPACE::MouseCursor c) = 0;
     virtual void winSetUserScale(float s) = 0;   // resize the window to 1080·s·host × 660·s·host
     virtual float winUserScale() const = 0;
-    virtual void winGrabKeyboard() {}   // take keyboard focus from the host (text entry)
+    virtual void winGrabKeyboard() {}   // a text/value entry opened: take the keyboard from the host
+    virtual void winReleaseKeyboard() {} // ... and it closed
 };
 
 struct Resources {

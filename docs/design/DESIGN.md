@@ -606,7 +606,14 @@ The exact paths are in the prototype's `icon()` switch. Port them verbatim to `I
   or one character (Ctrl: one word); Ctrl+A selects all. A click inside places the caret,
   Shift+click extends, dragging selects, a double-click selects everything. The caret restarts
   its blink, visible, on every edit or move.
-* Keyboard input comes from DGL `onCharacterInput` / `onKeyboard`.
+* Keyboard input comes from DGL `onCharacterInput` / `onKeyboard`. While an entry is open the UI
+  takes the keyboard focus, and on Windows it also installs a `WH_GETMESSAGE` hook
+  (`KickarseUI::keyHookProc`): key-downs and characters for the plugin window are handled there,
+  translated with the active layout (Shift, AltGr, dead keys), and consumed, because hosts may
+  keep keys for their shortcuts or never translate them. `KICKARSE_UI_DEBUGLOG` logs focus, hook
+  and key events.
+* While a name is being typed (Save as… from the browser), the browser's search field shows no
+  caret: the keyboard is in the header field.
 
 ### 6.12 Context menus
 
