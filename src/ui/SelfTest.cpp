@@ -64,20 +64,33 @@ std::string View::runSelfTest(float scale)
     model_.redo();
     check("redo re-applies it", model_.value(kParamDepth) == 42.f, fmt(model_.value(kParamDepth)));
 
-    // ---- segmented / lamps / stepper / rate grid
-    click(160.f, 223.f);   // "Spectral" in the mode segmented
+    // ---- segmented / lamps / rate switch / rate grid
+    const float modeY = 254.f + 13.f;   // the Trigger mode segmented
+    click(160.f, modeY);   // "Spectral" in the mode segmented
     check("mode segmented selects Spectral", model_.ivalue(kParamMode) == kModeSpectral, std::to_string(model_.ivalue(kParamMode)));
-    click(36.f, 223.f);
+    click(36.f, modeY);
     check("mode segmented selects Sync", model_.ivalue(kParamMode) == kModeSync);
     click(1030.f, 262.f);
     check("Split lamp toggles multiband", model_.on(kParamMulti));
     click(1030.f, 262.f);
-    const int r0 = model_.ivalue(kParamRate);
-    click(210.f, 95.f);
-    check("rate stepper: next = shorter", model_.ivalue(kParamRate) == r0 + 1);
-    click(122.f, 95.f);
+    // rate switch: centre (kLX + 54, 76 + 50), labels at radius 45 (Displays.cpp RateSwitch)
+    const float swX = 16.f + 54.f, swY = 76.f + 50.f;
+    auto swLabel = [&](int i, float& lx, float& ly) {
+        const float a = kKnobA0 + kKnobSweep * float(i) / float(kNumRates - 1);
+        lx = swX + std::cos(a) * 45.f;
+        ly = swY + std::sin(a) * 45.f;
+    };
+    float lx = 0.f, ly = 0.f;
+    swLabel(12, lx, ly);
+    click(lx, ly);
+    check("rate switch: a label jumps to 1/16", model_.ivalue(kParamRate) == 12, std::to_string(model_.ivalue(kParamRate)));
+    drag(swX, swY, swX, swY + 30.f);
+    check("rate switch: dragging down switches to longer", model_.ivalue(kParamRate) < 12, std::to_string(model_.ivalue(kParamRate)));
+    dbl(swX, swY);
+    check("rate switch: double-click resets to 1/4", model_.ivalue(kParamRate) == 6, std::to_string(model_.ivalue(kParamRate)));
+    click(176.f, swY - 10.f);
     check("rate value opens the grid", rate_->isOpen());
-    click(16.f + 60.f + 5.f * 42.f + 21.f, 118.f + 26.f + 13.f);   // Straight · 1/8
+    click(16.f + 60.f + 5.f * 42.f + 21.f, 180.f + 26.f + 13.f);   // Straight · 1/8 (grid opens at y 180)
     check("rate grid picks 1/8", model_.ivalue(kParamRate) == 9 && !rate_->isOpen(), std::to_string(model_.ivalue(kParamRate)));
 
     // ---- editor (through the headless EditorModel)
@@ -117,12 +130,12 @@ std::string View::runSelfTest(float scale)
     }
 
     // ---- threshold, crossover, presets, capture
-    click(160.f, 223.f - 0.f);   // Spectral
-    click(115.f, 223.f);         // Audio
+    click(160.f, modeY);         // Spectral
+    click(115.f, modeY);         // Audio
     const float th0 = model_.value(kParamThreshold);
-    drag(16.f + 106.f, 248.f + 38.f, 16.f + 136.f, 248.f + 38.f);
+    drag(16.f + 106.f, layout::modePanelY + 38.f, 16.f + 136.f, layout::modePanelY + 38.f);
     check("threshold meter drag", model_.value(kParamThreshold) > th0, fmt(th0) + " -> " + fmt(model_.value(kParamThreshold)));
-    click(36.f, 223.f);
+    click(36.f, modeY);
     model_.setNoUndo(kParamMulti, 1.f);
     const float xo = model_.value(kParamCrossover);
     drag(980.f, 315.f, 1010.f, 315.f);

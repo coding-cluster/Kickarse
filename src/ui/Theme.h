@@ -78,7 +78,7 @@ inline constexpr RectF labelStrip {268.f, 374.f, 588.f, 14.f};
 inline constexpr RectF qsLane     {268.f, 392.f, 588.f, 16.f};
 inline constexpr float leftX = 16.f, leftW = 212.f;     // left column content
 inline constexpr float rightX = 896.f, rightW = 168.f;  // right column content
-inline constexpr float modePanelY = 248.f;              // origin of the per-mode panel
+inline constexpr float modePanelY = 292.f;              // origin of the per-mode panel
 } // namespace layout
 
 }} // namespace kick::ui

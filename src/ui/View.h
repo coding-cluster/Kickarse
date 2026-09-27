@@ -34,7 +34,7 @@ public:
 
 struct Resources {
     DGL_NAMESPACE::NanoVG::FontId sc = -1, scSemi = -1, exp = -1;
-    DGL_NAMESPACE::NanoImage knobHero, knobSmall, grain;
+    DGL_NAMESPACE::NanoImage knobHero, knobSmall, grain, switchRate;
 };
 
 class MenuOverlay;

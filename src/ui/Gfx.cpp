@@ -208,6 +208,20 @@ void Gfx::image(const DGL_NAMESPACE::NanoImage& img, float x, float y, float w, 
     vg_.fill();
 }
 
+void Gfx::imageFrame(const DGL_NAMESPACE::NanoImage& img, int index, int cols, float x, float y, float w, float h)
+{
+    if (!img.isValid() || cols < 1)
+        return;
+    const auto size = img.getSize();
+    const float fs = float(size.getWidth()) / float(cols);   // frame size in texels
+    const int rows = std::max(1, int(float(size.getHeight()) / fs + 0.5f));
+    const int col = index % cols, row = index / cols;
+    vg_.beginPath();
+    vg_.rect(x, y, w, h);
+    vg_.fillPaint(vg_.imagePattern(x - float(col) * w, y - float(row) * h, w * float(cols), h * float(rows), 0.f, img, 1.f));
+    vg_.fill();
+}
+
 void Gfx::tiledImage(const DGL_NAMESPACE::NanoImage& img, float x, float y, float w, float h, float tile, float alpha)
 {
     if (!img.isValid())

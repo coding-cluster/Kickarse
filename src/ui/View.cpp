@@ -65,14 +65,6 @@ void caption(Gfx& g, const char* s, float x, float y, Align a = Align::Left, flo
     g.text(s, x, y, {size, Font::Sc, col::textDim, a});
 }
 
-std::string fmtMs(float ms)
-{
-    char buf[32];
-    if (ms < 1000.f) std::snprintf(buf, sizeof(buf), "%.0f ms", double(ms));
-    else std::snprintf(buf, sizeof(buf), "%.2f s", double(ms / 1000.f));
-    return buf;
-}
-
 // Text-entry caret movement over UTF-8: by code point, and by word the way Windows edit fields do
 // it (Ctrl+Right lands at the start of the next word, Ctrl+Left at the start of this/previous one).
 bool utf8Cont(char c) { return (static_cast<unsigned char>(c) & 0xC0) == 0x80; }
@@ -140,7 +132,12 @@ void View::setEditorBackend(EditorBackend* b)
 
 const DGL_NAMESPACE::NanoImage& View::image(Img i) const
 {
-    return i == Img::KnobHero ? res_.knobHero : i == Img::KnobSmall ? res_.knobSmall : res_.grain;
+    switch (i) {
+    case Img::KnobHero:   return res_.knobHero;
+    case Img::KnobSmall:  return res_.knobSmall;
+    case Img::SwitchRate: return res_.switchRate;
+    default:              return res_.grain;
+    }
 }
 
 void View::init()
@@ -287,32 +284,25 @@ void View::buildLeft()
     add<Segmented>(*this, RectF {140.f, 54.f, 88.f, 20.f}, std::vector<std::string> {"Note", "ms"},
                    [this] { return model_.ivalue(kParamTimeMode); }, [this](int i) { model_.setOnce(kParamTimeMode, float(i)); }, true)
         ->hints = {"Cycle length as a note value, locked to the tempo", "Cycle length in milliseconds"};
-    auto* rate = add<RateStepper>(*this, RectF {kLX, 76.f, kLW, 38.f});
+    auto* rate = add<RateSwitch>(*this, RectF {kLX, 76.f, kLW, 100.f});
     rate->visibleIf = [this] { return model_.ivalue(kParamTimeMode) == kTimeSync; };
-    auto* len = add<ValueField>(*this, kParamLengthMs, RectF {kLX, 76.f, kLW, 38.f}, "Length");
+    auto* len = add<ValueField>(*this, kParamLengthMs, RectF {kLX, 100.f, kLW, 38.f}, "Length");
     len->visibleIf = [this] { return model_.ivalue(kParamTimeMode) == kTimeFree; };
     add<Decor>(*this, [this](Gfx& g) {
-        if (model_.ivalue(kParamTimeMode) == kTimeFree) {
-            caption(g, "Free time: the grid divides one cycle.", kLX, 126.f);
-            return;
-        }
-        const int ri = std::clamp(model_.ivalue(kParamRate), 0, kNumRates - 1);
-        const float ms = float(kRates[ri].beats * 60.0 / double(std::max(1.f, live_.bpm)) * 1000.0);
-        char buf[96];
-        std::snprintf(buf, sizeof(buf), "%s at %.0f bpm = %s", kRateLabels[ri], double(live_.bpm), fmtMs(ms).c_str());
-        caption(g, buf, kLX, 126.f);
+        if (model_.ivalue(kParamTimeMode) == kTimeFree)
+            caption(g, "Free time: the grid divides one cycle.", kLX, 152.f);
     });
-    auto* play = add<Segmented>(*this, RectF {kLX, 140.f, kLW, 26.f}, std::vector<std::string> {"Loop", "One-shot"},
+    auto* play = add<Segmented>(*this, RectF {kLX, 184.f, kLW, 26.f}, std::vector<std::string> {"Loop", "One-shot"},
                                 [this] { return model_.ivalue(kParamPlayMode); }, [this](int i) { model_.setOnce(kParamPlayMode, float(i)); }, true);
     play->icons = {Icon::Loop, Icon::OneShot};
     play->hints = {"Loop: repeats every cycle", "One-shot: plays once per trigger, then holds"};
     add<Decor>(*this, [this](Gfx& g) {
-        g.groove(12.f, 182.f, 232.f, 182.f);
-        title(g, "Trigger", kLX, 200.f);
-        g.lamp(kLX + kLW - 4.f, 200.f, live_.trigFlash > 0.02f ? live_.trigFlash : 0.f, col::kick, 5.f);
-        g.text("hits", kLX + kLW - 14.f, 200.5f, {10.f, Font::Sc, col::textDim, Align::Right});
+        g.groove(12.f, 226.f, 232.f, 226.f);
+        title(g, "Trigger", kLX, 244.f);
+        g.lamp(kLX + kLW - 4.f, 244.f, live_.trigFlash > 0.02f ? live_.trigFlash : 0.f, col::kick, 5.f);
+        g.text("hits", kLX + kLW - 14.f, 244.5f, {10.f, Font::Sc, col::textDim, Align::Right});
     });
-    auto* mode = add<Segmented>(*this, RectF {kLX, 210.f, kLW, 26.f}, std::vector<std::string> {"Sync", "MIDI", "Audio", "Spectral", "Ring"},
+    auto* mode = add<Segmented>(*this, RectF {kLX, 254.f, kLW, 26.f}, std::vector<std::string> {"Sync", "MIDI", "Audio", "Spectral", "Ring"},
                                 [this] { return model_.ivalue(kParamMode); }, [this](int i) { model_.setOnce(kParamMode, float(i)); });
     mode->hints = {"Sync: the cycle follows the host transport", "MIDI: each note restarts the cycle",
                    "Audio: sidechain transients restart the cycle", "Spectral: cut only the frequencies the kick occupies",

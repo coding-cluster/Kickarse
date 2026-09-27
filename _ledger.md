@@ -66,3 +66,20 @@ Append-only record of work done in this repository (newest last). Read it before
   NOT verified in a host: no Windows/DAW here.
 - Notes: cause not proven on the user's machine; if typing still fails, KICKARSE_UI_DEBUGLOG
   shows whether keys reach the hook ("hook key/char") or DPF ("dpf key/char").
+
+## 09/27/2026 — Rate as a 3D rotary switch
+
+- Changed: tools/assets/knobs.py — render() split into geometry + shade() (hero/small output
+  pixel-identical, verified); switch_geometry()/render_switch_atlas(): amber "chicken head" lever
+  (uneven-capsule top view, elliptical crown, engraved pointer) on the gunmetal collar, 18 frames
+  → resources/images/switch_rate@2x.png (1008×504, 209 KB). src/ui/Displays.* — RateSwitch
+  replaces RateStepper (ticks, labels 4/1 1/1 1/4 1/8 1/16 1/64, value + ms + bpm; ParamGesture
+  for drag/wheel/reset/menu; label click jumps; value/Alt-click opens the grid).
+  src/ui/Gfx.* imageFrame(); Img::SwitchRate + loading (KickarseUI.cpp); View.cpp left column
+  +44 px (Loop 184, groove 226, Trigger 244, mode 254), Theme.h modePanelY 248 → 292; removed
+  fmtMs (unused); SelfTest coordinates + 4 switch checks. DESIGN.md §2 table, §6.5, §8.
+- Reused: the existing PBR knob renderer (shading unchanged), ParamGesture, formatParam(ms).
+- Verified: DSP 42/42, editor 63/63, presets 36/36, harness entry 19/19, UI self-test 30/30;
+  MinGW Kickarse-vst3 builds and embeds switch_rate; screenshots at 100 % / 200 % and all five
+  trigger modes + ms mode (panels fit, Spectral ends ~30 px above the footer).
+- Notes: design/prototype (HTML) still shows the old stepper; the atlas re-renders in ~2 min.

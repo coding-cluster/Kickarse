@@ -135,6 +135,7 @@ public:
         };
         img(r.knobHero, "knob_hero@2x", IMAGE_GENERATE_MIPMAPS);
         img(r.knobSmall, "knob_small@2x", IMAGE_GENERATE_MIPMAPS);
+        img(r.switchRate, "switch_rate@2x", IMAGE_GENERATE_MIPMAPS);
         img(r.grain, "grain_256", IMAGE_REPEAT_X | IMAGE_REPEAT_Y);
 
         fView->init();

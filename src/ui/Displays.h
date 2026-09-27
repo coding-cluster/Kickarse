@@ -7,21 +7,31 @@
 
 namespace kick { namespace ui {
 
-class RateStepper : public Widget {
+// Rate as a stepped rotary switch: an amber "chicken head" lever with one detent per note value
+// (pre-rendered per detent, see tools/assets/knobs.py), a few labelled positions around it and
+// the value with its length in ms beside it. Drag, scroll or click a label to switch; the value
+// opens the note-value grid.
+class RateSwitch : public Widget {
 public:
-    RateStepper(Services& s, RectF rect);
+    RateSwitch(Services& s, RectF rect);
     void paint(Gfx& g) override;
     void down(const Pointer& p) override;
-    void dbl(const Pointer& p) override { down(p); }
-    void wheel(const Pointer&, float n) override;
-    void move(const Pointer& p) override { zone_ = zoneAt(p.x); }
-    void leave() override { zone_ = -1; }
-    DGL_NAMESPACE::MouseCursor cursor(const Pointer&) const override { return DGL_NAMESPACE::kMouseCursorHand; }
+    void drag(const Pointer& p, float dx, float dy) override { g_.drag(p, dx, dy); }
+    void up(const Pointer&) override { g_.up(); }
+    void dbl(const Pointer& p) override;
+    void wheel(const Pointer& p, float n) override { g_.wheel(p, n); }
+    void context(const Pointer& p) override { g_.context(p); }
+    void move(const Pointer& p) override { zone_ = zoneAt(p.x, p.y); }
+    void leave() override { zone_ = kNone; }
+    DGL_NAMESPACE::MouseCursor cursor(const Pointer& p) const override;
     std::string hint() const override;
 private:
-    int zoneAt(float x) const;   // 0 prev, 1 value, 2 next
-    void step(int d);
-    int zone_ = -1;
+    enum { kNone = -3, kKnob = -2, kValue = -1 };   // or >= 0: the rate index of a label
+    int   zoneAt(float x, float y) const;
+    float cx() const { return r.x + 54.f; }
+    float cy() const { return r.y + 50.f; }
+    ParamGesture g_;
+    int zone_ = kNone;
 };
 
 class GridDropdown : public Widget {

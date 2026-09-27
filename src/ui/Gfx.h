@@ -68,6 +68,8 @@ public:
 
     // -- images ------------------------------------------------------------------------------
     void image(const DGL_NAMESPACE::NanoImage& img, float x, float y, float w, float h, float alpha = 1.f);
+    // frame `index` of an atlas of equal square frames, `cols` per row, drawn at (x, y, w, h)
+    void imageFrame(const DGL_NAMESPACE::NanoImage& img, int index, int cols, float x, float y, float w, float h);
     void tiledImage(const DGL_NAMESPACE::NanoImage& img, float x, float y, float w, float h, float tile, float alpha);
 
     // -- icons (DESIGN.md §6.10) ---------------------------------------------------------------

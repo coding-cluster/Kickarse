@@ -34,7 +34,7 @@ struct MenuItem {
     static MenuItem head(std::string s) { MenuItem m; m.label = std::move(s); m.header = true; return m; }
 };
 
-enum class Img { KnobHero, KnobSmall, Grain };
+enum class Img { KnobHero, KnobSmall, Grain, SwitchRate };
 
 // What widgets can ask of the view.
 class Services {

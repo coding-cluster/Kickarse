@@ -93,13 +93,13 @@ The controls themselves are serious: no mascots, no novelty knobs, no jokes on l
 |---|---|
 | "Time" title | centre-y 64 |
 | Note/ms segmented | (140, 54, 88, 20) |
-| Rate stepper | (16, 76, 212, 38) |
-| Cycle caption | y = 126 |
-| Loop/One-shot segmented | (16, 140, 212, 26) |
-| Groove | y = 182 (x 12–232) |
-| "Trigger" title | y = 200; trigger LED at (224, 200); "hits" caption right-aligned at x = 214 |
-| Mode segmented | (16, 210, 212, 26) |
-| Mode panel | origin (16, 248), max 212 × 376 (§8) |
+| Rate switch | (16, 76, 212, 100): lever centre (70, 126); value column x ≥ 124 (§6.5) |
+| ms mode | Length field (16, 100, 212, 38); caption y = 152 |
+| Loop/One-shot segmented | (16, 184, 212, 26) |
+| Groove | y = 226 (x 12–232) |
+| "Trigger" title | y = 244; trigger LED at (224, 244); "hits" caption right-aligned at x = 214 |
+| Mode segmented | (16, 254, 212, 26) |
+| Mode panel | origin (16, 292), max 212 × 332 (§8) |
 
 **Centre column.**
 
@@ -508,14 +508,22 @@ A raised key (radius 3, `ink4`), height 22–30.
 * Unselected: text `textMute`, hover `text`.
 * Optional per-segment icon (loop / one-shot glyphs at 0.8 scale, before the text).
 
-### 6.5 Step selector (Rate)
+### 6.5 Rate switch
 
-* Well 212 × 38.
-* Chevron buttons 32 × 34 at both ends; the left one lengthens the cycle.
-* Centre value: exp 19 px, with a small caret 10 px right of the text meaning "click for grid".
-* Wheel steps one entry; the chevrons clamp at the ends.
-* Clicking the value opens the **rate grid** (§6.8).
-* **ms mode:** the stepper becomes a value field "Length … 250 ms" (drag, log mapping 5–4000 ms).
+* A stepped rotary switch: an amber "chicken head" lever (glossy phenolic, dark engraved pointer
+  line) on the spun gunmetal collar of the Depth knob, 52 px collar, 84 px frame. The lever is not
+  round, so `tools/assets/knobs.py` renders one frame per detent under the fixed upper-left light
+  (`switch_rate@2x.png`, 18 frames of 168 px, 6 per row) and the UI draws the frame for the
+  current rate (`Gfx::imageFrame`).
+* 18 detents over the knobs' 270° sweep, in rate-list order (clockwise = shorter). A tick per
+  detent at r 33 (minor 3 px `ink7`, major 5 px `textDim`, current 1.6 px `duck`); labels 9.5 px at
+  r 45 for 4/1, 1/1, 1/4, 1/8, 1/16, 1/64 (`duck` + 620 when current).
+* Right of it: the value (exp 20 px, caret = "click for grid"), the length at the host tempo
+  (11 px/620 `textMute`) and "at N bpm" (10.5 px `textDim`).
+* Drag vertically (240 px for the whole range, Shift fine) or scroll to switch; click a label to
+  jump; double-click or Ctrl-click resets to 1/4; right-click for the parameter menu; clicking the
+  value (or Alt-click) opens the **rate grid** (§6.8) below the switch.
+* **ms mode:** the switch becomes a value field "Length … 250 ms" (drag, log mapping 5–4000 ms).
 
 ### 6.6 Value field (Swing, Smooth, Rotate, Length)
 
@@ -835,7 +843,7 @@ The flow follows the Bridge handshake:
 
 ---
 
-## 8. Per-mode panels (left column, origin (16, 248), 212 wide)
+## 8. Per-mode panels (left column, origin (16, 292), 212 wide)
 
 Only the active mode's panel is drawn. Switching modes is instant (no animation). The mode
 labels in the UI are **Sync, MIDI, Audio, Spectral, Ring** (the Params label "Ring Mod" is
@@ -1312,7 +1320,7 @@ or tell me to adapt.
 | `Format.h/.cpp` | value formats (§4.3), normalised↔plain mapping, type-in parsing, note names |
 | `Model.h/.cpp` | parameter cache and the begin/set/end plumbing, envelope mirrors, preset identity, `uiState`, History interface (local fallback) |
 | `Widget.h`, `Controls.cpp` | widget base and value kit: knob (small/hero), value field, value text, lamp button, icon button, segmented |
-| `Displays.h/.cpp` | rate stepper, grid dropdown, M/S slider, threshold meter, detection-filter graph, crossover graph, spectral view, bar view, note stepper, keyboard, GR meter |
+| `Displays.h/.cpp` | rate switch, grid dropdown, M/S slider, threshold meter, detection-filter graph, crossover graph, spectral view, bar view, note stepper, keyboard, GR meter |
 | `EditorView.h/.cpp` | the envelope editor view (§7), drawing from an `EditorBackend` |
 | `EditorGlue.h/.cpp` | backend over the headless `src/editor` (EditorModel + EditorController); also the undo History and the envelope → host listener |
 | `EditorLocal.h/.cpp` | display-only backend (fallback) |

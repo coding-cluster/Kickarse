@@ -9,8 +9,11 @@ a dim ceiling, a dark floor) for reflections.
 
     knob_hero@2x.png   Depth knob: glazed bone ceramic cap on a spun gunmetal collar.
     knob_small@2x.png  Small knobs: soft-touch graphite rubber skirt, spun gunmetal insert.
+    switch_rate@2x.png Rate switch: amber "chicken head" lever on a spun gunmetal collar, one frame
+                       per detent (see SWITCH below: the lever is not round, so it cannot be one
+                       static image).
 
-Only the *body* is baked. Everything that moves or carries meaning (pointer line, value ring,
+For the round knobs only the *body* is baked. Everything that moves or carries meaning (pointer line, value ring,
 ticks, band colour) is drawn as vectors at runtime. Because the bodies are rotationally
 symmetric and the light does not move when a real knob turns, one static image per size is
 physically correct: no filmstrip, no rotating highlights, ~30 KB per knob instead of MBs.
@@ -221,30 +224,73 @@ MATERIALS = {
     "ceramic": dict(albedo=hexlin("#CEC7B8"), f0=np.array([0.045] * 3), rough=0.12, aniso=None, env_gain=1.0),
     "gunmetal": dict(albedo=hexlin("#1B1B1D"), f0=hexlin("#5E5F63"), rough=0.30, aniso=(0.08, 0.42), env_gain=0.9),
     "rubber": dict(albedo=hexlin("#232322"), f0=np.array([0.035] * 3), rough=0.62, aniso=None, env_gain=0.35),
+    # rate switch lever: glossy amber phenolic (the UI's duck colour), dark engraved pointer line
+    "amber": dict(albedo=hexlin("#DB8F0E"), f0=np.array([0.045] * 3), rough=0.13, aniso=None, env_gain=0.95),
+    "inlay": dict(albedo=hexlin("#2B2117"), f0=np.array([0.04] * 3), rough=0.40, aniso=None, env_gain=0.4),
 }
 
 
-def render(spec: KnobSpec):
+@dataclasses.dataclass
+class Geometry:
+    """Everything the shader needs, on the supersampled canvas grid (radius units: 1 = body)."""
+    px2: int                 # output canvas size (the @2x PNG)
+    body_r_px: float         # body radius in supersampled pixels
+    xx: np.ndarray
+    yy: np.ndarray
+    r: np.ndarray            # distance from the canvas centre
+    h: np.ndarray            # height field
+    n: np.ndarray            # unit normals (..., 3)
+    tangent: np.ndarray      # anisotropy direction (spun metal grooves run circumferentially)
+    own: np.ndarray          # index into materials, per pixel
+    materials: list          # material names
+    body: np.ndarray         # opaque pixels
+    darken: np.ndarray = None   # optional multiplicative factor on the shaded colour
+
+
+def canvas_grid(spec: KnobSpec):
     px2 = spec.canvas_px_1x * 2
     N = px2 * SS
     body_r_px = spec.body_px_1x * 2 * SS / 2.0  # radius in supersampled pixels
-
-    rt, ht, owner_t = height_table(spec)
-    dh = np.gradient(ht, rt)
-
     c = (N - 1) / 2.0
     yy, xx = np.mgrid[0:N, 0:N].astype(np.float64)
     dx, dy = (xx - c) / body_r_px, (yy - c) / body_r_px
+    return px2, body_r_px, xx, yy, dx, dy
+
+
+def radial_normals(slope, dx, dy, r):
+    inv_r = 1.0 / np.maximum(r, 1e-6)
+    ux, uy = dx * inv_r, dy * inv_r   # radial unit vector
+    n = np.stack([-slope * ux, -slope * uy, np.ones_like(r)], axis=-1)
+    n /= np.linalg.norm(n, axis=-1, keepdims=True)
+    tangent = np.stack([-uy, ux, np.zeros_like(r)], axis=-1)  # circumferential (groove direction)
+    return n, tangent
+
+
+def radial_geometry(spec: KnobSpec) -> Geometry:
+    """A surface of revolution: the round knobs."""
+    px2, body_r_px, xx, yy, dx, dy = canvas_grid(spec)
+    rt, ht, owner_t = height_table(spec)
+    dh = np.gradient(ht, rt)
     r = np.hypot(dx, dy)
     h = np.interp(r, rt, ht)
     slope = np.interp(r, rt, dh)
     own = owner_t[np.clip(np.searchsorted(rt, r), 0, len(rt) - 1)]
     body = h > 1e-6
+    n, tangent = radial_normals(slope, dx, dy, r)
+    darken = None
+    if spec.groove_r > 0:   # thin dark groove (e.g. where a metal insert meets the rubber)
+        gr = np.exp(-((r - spec.groove_r) / (spec.groove_w * 0.5)) ** 2)
+        darken = 1.0 - 0.85 * gr
+    return Geometry(px2, body_r_px, xx, yy, r, h, n, tangent, own, [p.material for p in spec.parts], body, darken)
 
-    inv_r = 1.0 / np.maximum(r, 1e-6)
-    ux, uy = dx * inv_r, dy * inv_r   # radial unit vector
-    n = np.stack([-slope * ux, -slope * uy, np.ones_like(r)], axis=-1)
-    n /= np.linalg.norm(n, axis=-1, keepdims=True)
+
+def render(spec: KnobSpec):
+    return shade(radial_geometry(spec))
+
+
+def shade(geo: Geometry):
+    """Ambient occlusion, key-light shadow, PBR shading and compositing of one canvas."""
+    px2, body_r_px, xx, yy, r, h, n, own, body = geo.px2, geo.body_r_px, geo.xx, geo.yy, geo.r, geo.h, geo.n, geo.own, geo.body
 
     # --- ambient occlusion (horizon based) on the height field, in radius units
     hpx = h * body_r_px
@@ -280,12 +326,12 @@ def render(spec: KnobSpec):
     V = np.array([0.0, 0.0, 1.0])
     col = np.zeros(h.shape + (3,))
     nv = np.clip(n[..., 2], 1e-4, 1.0)
-    tangent = np.stack([-uy, ux, np.zeros_like(r)], axis=-1)  # circumferential (groove direction)
-    for mi, part in enumerate(spec.parts):
+    tangent = geo.tangent
+    for mi, material in enumerate(geo.materials):
         mask = body & (own == mi)
         if not mask.any():
             continue
-        m = MATERIALS[part.material]
+        m = MATERIALS[material]
         nm, tm = n[mask], tangent[mask]
         bm = np.cross(nm, tm)
         nvm = nv[mask]
@@ -325,10 +371,8 @@ def render(spec: KnobSpec):
         out += env * Fe * m["env_gain"] * (0.35 + 0.65 * ao[mask][:, None])
         col[mask] = out
 
-    # thin dark groove (e.g. where a metal insert meets the rubber)
-    if spec.groove_r > 0:
-        g = np.exp(-((r - spec.groove_r) / (spec.groove_w * 0.5)) ** 2)
-        col *= (1.0 - 0.85 * g)[..., None]
+    if geo.darken is not None:
+        col *= geo.darken[..., None]
 
     # --- compose: body opaque, panel = black with alpha from shadow & AO
     panel_dark = 1.0 - (0.42 * (1.0 - shadow) + 0.58 * (1.0 - ao)) * 1.0
@@ -372,6 +416,97 @@ SMALL = KnobSpec(
 )
 
 
+# ---------------------------------------------------------------------------------------------
+# Rate switch: a "chicken head" lever on a spun collar. The lever is not rotationally symmetric,
+# so one image cannot turn under a fixed light: each detent is rendered as its own frame, with
+# the light staying put, and the frames are packed into an atlas.
+
+SWITCH = KnobSpec(
+    name="switch_rate",
+    body_px_1x=52.0,         # collar diameter; the lever reaches about 1.0 radius each way
+    canvas_px_1x=84,
+    parts=[Part("collar", "gunmetal", r1=1.00, z1=0.14, rad=0.05)],
+)
+SWITCH_STEPS = 18            # kNumRates (src/shared/Params.h)
+SWITCH_COLS = 6
+SWITCH_A0 = np.deg2rad(135.0)    # same sweep as every knob: 135 deg (down-left), 270 deg clockwise
+SWITCH_SWEEP = np.deg2rad(270.0)
+
+
+def sd_uneven_capsule(u, v, ax, ra, bx, rb):
+    """2D distance to a capsule along the u axis from (ax, 0) radius ra to (bx, 0) radius rb
+    (Inigo Quilez, 'uneven capsule'), for bx > ax."""
+    L = bx - ax
+    px, py = u - ax, np.abs(v)
+    b = (ra - rb) / L
+    a = np.sqrt(max(1.0 - b * b, 1e-9))
+    k = px * a - py * b
+    d_a = np.hypot(px, py) - ra
+    d_b = np.hypot(px - L, py) - rb
+    d_mid = (py * a + px * b) - ra
+    return np.where(k < 0.0, d_a, np.where(k > a * L, d_b, d_mid))
+
+
+def smin(a, b, k):
+    h = np.clip(0.5 + 0.5 * (b - a) / k, 0.0, 1.0)
+    return b + (a - b) * h - k * h * (1.0 - h)
+
+
+def lever_height(u, v):
+    """Height of the lever (0 outside) and whether a point is on the pointer line.
+    Top view: a tapered bar, broad at the tail, narrow at the nose. Section: a vertical side wall
+    and an elliptical crown whose crest runs along the centre line, lower where the bar is narrow."""
+    d = sd_uneven_capsule(u, v, -0.60, 0.34, 0.92, 0.09)
+    ridge = np.where(u < -0.10, 0.74 - 0.10 * ((u + 0.10) / 0.84) ** 2,
+                     0.74 - 0.18 * np.clip((u + 0.10) / 1.11, 0.0, 1.0) ** 1.5)
+    wall = 0.30
+    t = np.clip(-d / 0.30, 0.0, 1.0)                 # 0 at the rim, 1 at 0.30 in from it
+    crown = np.sqrt(1.0 - (1.0 - t) ** 2)
+    edge = np.clip(d + 0.035, 0.0, 0.035)            # small fillet where the wall meets the crown
+    h = wall + (ridge - wall) * crown - (0.035 - np.sqrt(np.maximum(0.035 ** 2 - edge ** 2, 0.0)))
+    inside = d <= 0.0
+    h = np.where(inside, h, 0.0)
+    line = inside & (np.abs(v) < 0.030) & (u > 0.12) & (u < 0.86)
+    h = np.where(line, h - 0.012, h)                 # engraved: a shallow groove
+    return h, line
+
+
+def switch_geometry(angle: float) -> Geometry:
+    spec = SWITCH
+    px2, body_r_px, xx, yy, dx, dy = canvas_grid(spec)
+    rt, ht, _ = height_table(spec)
+    r = np.hypot(dx, dy)
+    hc = np.interp(r, rt, ht)
+    nc, tangent = radial_normals(np.interp(r, rt, np.gradient(ht, rt)), dx, dy, r)
+    ca, sa = np.cos(angle), np.sin(angle)
+    u, v = dx * ca + dy * sa, -dx * sa + dy * ca
+    hl, inlay = lever_height(u, v)
+    # lever normals from the supersampled height field (radius units per pixel = 1 / body_r_px)
+    gy, gx = np.gradient(hl, 1.0 / body_r_px)
+    nl = np.stack([-gx, -gy, np.ones_like(hl)], axis=-1)
+    nl /= np.linalg.norm(nl, axis=-1, keepdims=True)
+    lever = hl > hc
+    h = np.where(lever, hl, hc)
+    n = np.where(lever[..., None], nl, nc)
+    own = np.where(lever, np.where(inlay, 2, 1), 0)
+    body = h > 1e-6
+    return Geometry(px2, body_r_px, xx, yy, r, h, n, tangent, own, ["gunmetal", "amber", "inlay"], body)
+
+
+def render_switch_atlas() -> np.ndarray:
+    frames = []
+    for i in range(SWITCH_STEPS):
+        a = SWITCH_A0 + SWITCH_SWEEP * i / (SWITCH_STEPS - 1)
+        frames.append(shade(switch_geometry(a)))
+    rows = (SWITCH_STEPS + SWITCH_COLS - 1) // SWITCH_COLS
+    fs = frames[0].shape[0]
+    atlas = np.zeros((rows * fs, SWITCH_COLS * fs, 4), dtype=np.uint8)
+    for i, f in enumerate(frames):
+        y, x = divmod(i, SWITCH_COLS)
+        atlas[y * fs:(y + 1) * fs, x * fs:(x + 1) * fs] = f
+    return atlas
+
+
 def main() -> None:
     OUT.mkdir(parents=True, exist_ok=True)
     for spec in (HERO, SMALL):
@@ -379,6 +514,11 @@ def main() -> None:
         path = OUT / f"{spec.name}@2x.png"
         Image.fromarray(img, "RGBA").save(path, optimize=True)
         print(f"{path.name:22s} {img.shape[1]}x{img.shape[0]}  {path.stat().st_size / 1024:.1f} KB")
+    atlas = render_switch_atlas()
+    path = OUT / f"{SWITCH.name}@2x.png"
+    Image.fromarray(atlas, "RGBA").save(path, optimize=True)
+    print(f"{path.name:22s} {atlas.shape[1]}x{atlas.shape[0]}  {path.stat().st_size / 1024:.1f} KB"
+          f"  ({SWITCH_STEPS} frames of {SWITCH.canvas_px_1x * 2} px, {SWITCH_COLS} per row)")
 
 
 if __name__ == "__main__":
