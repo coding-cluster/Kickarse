@@ -93,3 +93,13 @@ Append-only record of work done in this repository (newest last). Read it before
 - Notes: a committed .mp4 only renders as a link on GitHub; an inline player with sound needs a
   github.com/user-attachments upload. videos/ also holds an identical copy under the original
   file name (same blob, no extra size).
+
+## 09/27/2026 — Release prep: 0.2.0
+
+- Changed: version 0.1.0 → 0.2.0 in CMakeLists.txt, plugin/KickarsePlugin.cpp (d_version),
+  tools/hosttest/main.cpp; installer default KICKARSE_VERSION (CMakeLists.txt + InstallLogic.cpp
+  fallback) 1.0.0 → 0.2.0, so Apps & Features shows the right version without -Version.
+  plugin/KickarsePlugin.cpp getLicense() "Proprietary" → "GPL-3.0" (matches LICENSE).
+- Verified: grep finds no other version strings outside external/.
+- Notes: v0.1.0 installer was built with the 1.0.0 default unless -Version was passed. The
+  GitHub release itself (tag, Kickarse-Setup.exe, SHA256SUMS.txt) needs the Windows build.

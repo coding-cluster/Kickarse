@@ -14,7 +14,7 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
-set(KICKARSE_VERSION "1.0.0" CACHE STRING "Kickarse version (X.Y.Z)")
+set(KICKARSE_VERSION "0.2.0" CACHE STRING "Kickarse version (X.Y.Z)")
 
 # ---------------------------------------------------------------- payload dir
 if(NOT DEFINED KICKARSE_PAYLOAD_DIR)

@@ -40,12 +40,12 @@ const char* KickarsePlugin::getMaker() const
 
 const char* KickarsePlugin::getLicense() const
 {
-    return "Proprietary";
+    return "GPL-3.0";
 }
 
 uint32_t KickarsePlugin::getVersion() const
 {
-    return d_version(0, 1, 0);
+    return d_version(0, 2, 0);
 }
 
 // -- Init -------------------------------------------------------------------------------------

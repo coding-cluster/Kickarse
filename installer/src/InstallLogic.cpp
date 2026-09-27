@@ -11,7 +11,7 @@
 #include <vector>
 
 #ifndef KICKARSE_VERSION_STR_W
-#define KICKARSE_VERSION_STR_W L"1.0.0"
+#define KICKARSE_VERSION_STR_W L"0.2.0"
 #endif
 
 namespace kick {

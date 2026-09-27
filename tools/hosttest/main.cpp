@@ -318,7 +318,7 @@ void CLAP_ABI clapHostRequestCallback(const clap_host_t*) {}
 clap_host_t g_clapHost = {
     CLAP_VERSION,
     nullptr,
-    "Kickarse Hosttest", "Kickarse", "", "0.1.0",
+    "Kickarse Hosttest", "Kickarse", "", "0.2.0",
     clapHostGetExtension, clapHostRequestRestart, clapHostRequestProcess, clapHostRequestCallback,
 };
 

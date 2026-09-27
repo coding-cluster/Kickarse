@@ -8,7 +8,7 @@ cmake_minimum_required(VERSION 3.22)
 # the languages are enabled (i.e. before project()) and before DPF's targets are created.
 cmake_policy(SET CMP0091 NEW)
 
-project(Kickarse VERSION 0.1.0 LANGUAGES C CXX)
+project(Kickarse VERSION 0.2.0 LANGUAGES C CXX)
 
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
