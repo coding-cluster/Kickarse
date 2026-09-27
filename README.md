@@ -8,6 +8,16 @@ with a drawable envelope, low/high split, Mid/Side, Delta monitoring, Quick Shif
   <img src="screenshots/sync.png" width="780" alt="Kickarse envelope editor in Sync mode">
 </p>
 
+## Demo
+
+<p align="center">
+  <a href="videos/recording.mp4">
+    <img src="screenshots/demo.gif" width="780" alt="Kickarse running on real audio: Spectral mode with the low/high split, cut-per-band meter and gain reduction reacting to the kick">
+  </a><br>
+  <sub>Real audio, Spectral mode with the low/high split. The preview is silent:
+  <b><a href="videos/recording.mp4">watch the full demo with sound</a></b> (75 s, MP4).</sub>
+</p>
+
 ## Features
 
 **Five modes**

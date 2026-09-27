@@ -83,3 +83,13 @@ Append-only record of work done in this repository (newest last). Read it before
   MinGW Kickarse-vst3 builds and embeds switch_rate; screenshots at 100 % / 200 % and all five
   trigger modes + ms mode (panels fit, Spectral ends ~30 px above the footer).
 - Notes: design/prototype (HTML) still shows the old stepper; the atlas re-renders in ~2 min.
+
+## 09/27/2026 — Demo video in the README
+
+- Changed: README.md — "Demo" section under the hero screenshot: silent GIF preview linking to
+  videos/recording.mp4 (the user's 75 s recording with real audio, committed by them in bd46e8f).
+  screenshots/demo.gif — 10 s from 0:20, 780 px, 12 fps, 128-colour palette (2.1 MB, ffmpeg).
+- Verified: frame check of the GIF; both README paths exist in the tree.
+- Notes: a committed .mp4 only renders as a link on GitHub; an inline player with sound needs a
+  github.com/user-attachments upload. videos/ also holds an identical copy under the original
+  file name (same blob, no extra size).
