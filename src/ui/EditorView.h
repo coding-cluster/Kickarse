@@ -72,6 +72,7 @@ public:
     void up(const Pointer& p) override;
     void dbl(const Pointer& p) override;
     void move(const Pointer& p) override;
+    bool repaintsOnMove() const override { return false; }
     void leave() override;
     void context(const Pointer& p) override;
     bool key(unsigned key, const Pointer& p) override;
@@ -93,10 +94,12 @@ private:
     void drawNodes(Gfx& g, const Rgba& col);
     void drawQuickShift(Gfx& g, const Rgba& col);
     void drawPreviews(Gfx& g, const Rgba& col);
+    void drawSmoothed(Gfx& g, const Rgba& col);
 
     EditorBackend& be_;
     RectF plot_;
-    std::vector<EditorPoint> pts_, other_, ghost_;
+    std::vector<EditorPoint> pts_, other_, ghost_, smooth_;
+    std::vector<float> smoothIn_;
     std::vector<std::pair<float, bool>> grid_;
     std::vector<int> gridIndex_;
     bool     morphing_ = false;

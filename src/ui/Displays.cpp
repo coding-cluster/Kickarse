@@ -28,55 +28,96 @@ float cycleBeatsNow(const Model& m, const Live& l)
 } // namespace
 
 // ---------------------------------------------------------------------------------------------
-// RateStepper
+// RateSwitch
 
-RateStepper::RateStepper(Services& s, RectF rect) : Widget(s) { r = rect; }
+namespace {
+constexpr int   kSwitchLabels[] = {0, 2, 6, 9, 12, 17};   // 4/1, 1/1, 1/4, 1/8, 1/16, 1/64
+constexpr float kSwitchTickR = 33.f, kSwitchLabelR = 45.f;
+constexpr int   kSwitchCols = 6;                           // atlas layout (tools/assets/knobs.py)
+constexpr float kSwitchFrame = 84.f;                       // one frame at 100 %
 
-int RateStepper::zoneAt(float x) const
+float switchAngle(int i) { return kKnobA0 + kKnobSweep * float(i) / float(kNumRates - 1); }
+} // namespace
+
+RateSwitch::RateSwitch(Services& s, RectF rect) : Widget(s), g_(s, kParamRate, 240.f, false) { r = rect; }
+
+int RateSwitch::zoneAt(float x, float y) const
 {
-    if (x < r.x + 34.f) return 0;
-    if (x > r.right() - 34.f) return 2;
-    return 1;
+    for (int i : kSwitchLabels) {
+        const float a = switchAngle(i);
+        if (std::fabs(x - (cx() + std::cos(a) * kSwitchLabelR)) < 13.f && std::fabs(y - (cy() + std::sin(a) * kSwitchLabelR)) < 8.f)
+            return i;
+    }
+    if (x >= r.x + 108.f)
+        return kValue;
+    return std::hypot(x - cx(), y - cy()) <= kSwitchTickR + 4.f ? kKnob : kNone;
 }
 
-void RateStepper::step(int d)
+void RateSwitch::down(const Pointer& p)
 {
-    Model& m = sv.model();
-    m.setOnce(kParamRate, float(std::clamp(m.ivalue(kParamRate) + d, 0, kNumRates - 1)));
+    const int z = zoneAt(p.x, p.y);
+    if (z >= 0) {
+        sv.model().setOnce(kParamRate, float(z));
+    } else if (z == kValue || p.alt) {   // Alt-click: the grid, not a typed index
+        sv.openRateGrid(r.x, r.bottom() + 4.f);
+    } else if (z == kKnob) {
+        g_.down(p);
+    }
 }
 
-void RateStepper::down(const Pointer& p)
+void RateSwitch::dbl(const Pointer& p)
 {
-    const int z = zoneAt(p.x);
-    if (z == 0) step(-1);
-    else if (z == 2) step(1);
-    else sv.openRateGrid(r.x, r.bottom() + 4.f);
+    if (zoneAt(p.x, p.y) == kKnob)
+        g_.reset();
+    else
+        down(p);
 }
 
-void RateStepper::wheel(const Pointer&, float n)
+MouseCursor RateSwitch::cursor(const Pointer& p) const
 {
-    step(n > 0.f ? -1 : 1);
+    const int z = zoneAt(p.x, p.y);
+    return z == kKnob ? DGL_NAMESPACE::kMouseCursorUpDown : z == kNone ? DGL_NAMESPACE::kMouseCursorArrow : DGL_NAMESPACE::kMouseCursorHand;
 }
 
-std::string RateStepper::hint() const
+std::string RateSwitch::hint() const
 {
-    if (zone_ == 0) return "Longer cycle";
-    if (zone_ == 2) return "Shorter cycle";
-    return "Rate: click for the note-value grid \xC2\xB7 wheel to step";
+    if (zone_ >= 0) return std::string("Switch to ") + kRateLabels[zone_];
+    if (zone_ == kValue) return "Rate: click for the note-value grid";
+    return std::string("Rate  ") + kRateLabels[std::clamp(sv.model().ivalue(kParamRate), 0, kNumRates - 1)]
+         + "   \xE2\x80\x94   drag or scroll to switch \xC2\xB7 click a label to jump \xC2\xB7 double-click resets to 1/4";
 }
 
-void RateStepper::paint(Gfx& g)
+void RateSwitch::paint(Gfx& g)
 {
-    g.well(r.x, r.y, r.w, r.h, 3.f);
-    const float hp = zone_ == 0 ? hot : 0.f, hn = zone_ == 2 ? hot : 0.f, hvv = zone_ == 1 ? hot : 0.f;
-    if (hp > 0.01f) g.fillRR(r.x + 2.f, r.y + 2.f, 32.f, r.h - 4.f, 3.f, col::warm.withAlpha(0.05f * hp));
-    if (hn > 0.01f) g.fillRR(r.right() - 34.f, r.y + 2.f, 32.f, r.h - 4.f, 3.f, col::warm.withAlpha(0.05f * hn));
-    g.icon(Icon::Prev, r.x + 18.f, r.cy(), mix(col::textMute, col::textHi, hp));
-    g.icon(Icon::Next, r.right() - 18.f, r.cy(), mix(col::textMute, col::textHi, hn));
-    const char* lab = kRateLabels[std::clamp(sv.model().ivalue(kParamRate), 0, kNumRates - 1)];
-    g.text(lab, r.cx(), r.cy() + 1.f, {19.f, Font::Exp, mix(col::text, col::textHi, 0.6f + hvv * 0.4f), Align::Center});
-    g.icon(Icon::Caret, r.cx() + g.measure(lab, 19.f, Font::Exp) * 0.5f + 10.f, r.cy() + 1.f,
-           hvv > 0.3f ? col::textMute : col::textDim, 0.9f);
+    const int ri = std::clamp(sv.model().ivalue(kParamRate), 0, kNumRates - 1);
+    const float x0 = cx(), y0 = cy();
+    const float knobHot = zone_ == kKnob || g_.dragging() ? hot : 0.f;
+    // detents: a tick per note value, longer at the labelled ones; the current one lit
+    for (int i = 0; i < kNumRates; ++i) {
+        const float a = switchAngle(i), ca = std::cos(a), sa = std::sin(a);
+        const bool major = std::find(std::begin(kSwitchLabels), std::end(kSwitchLabels), i) != std::end(kSwitchLabels);
+        const float r1 = kSwitchTickR + (major ? 5.f : 3.f);
+        const Rgba c = i == ri ? col::duck : major ? mix(col::textDim, col::textMute, knobHot) : mix(col::ink7, col::textDim, knobHot);
+        g.line(x0 + ca * kSwitchTickR, y0 + sa * kSwitchTickR, x0 + ca * r1, y0 + sa * r1, c, i == ri ? 1.6f : 1.f);
+    }
+    for (int i : kSwitchLabels) {
+        const float a = switchAngle(i);
+        const Rgba c = i == ri ? col::duck : zone_ == i ? mix(col::textMute, col::text, hot) : col::textDim;
+        g.text(kRateLabels[i], x0 + std::cos(a) * kSwitchLabelR, y0 + std::sin(a) * kSwitchLabelR + 0.5f,
+               {9.5f, i == ri ? Font::ScSemi : Font::Sc, c, Align::Center});
+    }
+    // the lever, lit from the upper left like everything else: one pre-rendered frame per detent
+    g.imageFrame(sv.image(Img::SwitchRate), ri, kSwitchCols, x0 - kSwitchFrame * 0.5f, y0 - kSwitchFrame * 0.5f, kSwitchFrame, kSwitchFrame);
+    // value and its length at the host tempo
+    const float vx = r.x + 108.f + (r.right() - r.x - 108.f) * 0.5f, vh = zone_ == kValue ? hot : 0.f;
+    const char* lab = kRateLabels[ri];
+    g.text(lab, vx, y0 - 10.f, {20.f, Font::Exp, mix(col::text, col::textHi, 0.6f + vh * 0.4f), Align::Center});
+    g.icon(Icon::Caret, vx + g.measure(lab, 20.f, Font::Exp) * 0.5f + 9.f, y0 - 9.f, vh > 0.3f ? col::textMute : col::textDim, 0.9f);
+    const float ms = float(kRates[ri].beats * 60.0 / double(std::max(1.f, sv.live().bpm)) * 1000.0);
+    g.text(formatParam(kParamLengthMs, ms).c_str(), vx, y0 + 12.f, {11.f, Font::ScSemi, col::textMute, Align::Center});
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "at %.0f bpm", double(sv.live().bpm));
+    g.text(buf, vx, y0 + 26.f, {10.5f, Font::Sc, col::textDim, Align::Center});
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -421,14 +462,24 @@ void CrossoverGraph::paint(Gfx& g)
     const float top = r.y + 12.f, bot = r.bottom() - 4.f, fc = m.value(kParamCrossover);
     const float ord = m.ivalue(kParamSlope) == kSlope24 ? 4.f : 2.f;
     const int solo = m.ivalue(kParamBandSolo);
+    if (fc != curveFc_ || ord != curveOrd_) {
+        curveFc_ = fc;
+        curveOrd_ = ord;
+        for (int band = 0; band < 2; ++band) {
+            curveY_[band].clear();
+            for (float px = r.x; px <= r.right() + 0.01f; px += 1.5f) {
+                const float f = 20.f * std::pow(1000.f, std::clamp((px - r.x - 4.f) / (r.w - 8.f), 0.f, 1.f));
+                const float rr = std::pow(f / fc, ord);
+                const float mm = band ? rr / (1.f + rr) : 1.f / (1.f + rr);
+                curveY_[band].push_back(lerpf(bot, top, std::pow(mm, 0.6f)));
+            }
+        }
+    }
     auto curve = [&](int band) {
         vg.beginPath();
-        for (float px = r.x; px <= r.right() + 0.01f; px += 1.5f) {
-            const float f = 20.f * std::pow(1000.f, std::clamp((px - r.x - 4.f) / (r.w - 8.f), 0.f, 1.f));
-            const float rr = std::pow(f / fc, ord);
-            const float mm = band ? rr / (1.f + rr) : 1.f / (1.f + rr);
-            const float yy = lerpf(bot, top, std::pow(mm, 0.6f));
-            if (px == r.x) vg.moveTo(px, yy); else vg.lineTo(px, yy);
+        float px = r.x;
+        for (std::size_t i = 0; i < curveY_[band].size(); ++i, px += 1.5f) {
+            if (i == 0) vg.moveTo(px, curveY_[band][i]); else vg.lineTo(px, curveY_[band][i]);
         }
     };
     for (int band = 0; band < 2; ++band) {
@@ -540,12 +591,15 @@ void BarView::paint(Gfx& g)
             p = 1.f;
         return iy + (1.f - env.evaluateLeft(map.toNode(p))) * ih;
     };
+    float ys[N + 1];   // evaluated once, used by the fill and the stroke
+    for (int i = 0; i <= N; ++i)
+        ys[i] = yAt(i);
     vg.save();
     vg.scissor(ix, iy - 2.f, iw, ih + 4.f);
     vg.beginPath();
     for (int i = 0; i <= N; ++i) {
         const float px = ix + iw * float(i) / float(N);
-        if (i == 0) vg.moveTo(px, yAt(i)); else vg.lineTo(px, yAt(i));
+        if (i == 0) vg.moveTo(px, ys[i]); else vg.lineTo(px, ys[i]);
     }
     vg.lineTo(ix + iw, iy + ih);
     vg.lineTo(ix, iy + ih);
@@ -555,7 +609,7 @@ void BarView::paint(Gfx& g)
     vg.beginPath();
     for (int i = 0; i <= N; ++i) {
         const float px = ix + iw * float(i) / float(N);
-        if (i == 0) vg.moveTo(px, yAt(i)); else vg.lineTo(px, yAt(i));
+        if (i == 0) vg.moveTo(px, ys[i]); else vg.lineTo(px, ys[i]);
     }
     vg.strokeColor(Gfx::c(col::duck));
     vg.strokeWidth(1.25f);
@@ -700,16 +754,28 @@ GrMeter::GrMeter(Services& s, RectF rect) : Widget(s) { r = rect; }
 
 void GrMeter::paint(Gfx& g)
 {
-    const float gr = std::clamp(-sv.live().grDb, 0.f, 36.f);
-    g.fillRR(r.x, r.y, r.w, 5.f, 1.f, col::ink0);
-    if (gr > 0.01f)
-        g.fillRR(r.x + r.w - r.w * gr / 36.f, r.y, r.w * gr / 36.f, 5.f, 1.f, col::duck);
+    // Readout on top, a 10 px bar (fills right to left, 6 dB ticks), end labels below: large enough
+    // to read at a glance from across the room.
+    constexpr float kRange = 36.f;
+    const float gr = std::clamp(-sv.live().grDb, 0.f, kRange);
+    const bool on = gr >= 0.05f;
+    g.text("GR", r.x, r.y + 6.5f, {10.5f, Font::Sc, col::textMute, Align::Left});
     char buf[32];
-    if (gr < 0.05f)
-        std::snprintf(buf, sizeof(buf), "GR 0.0");
+    if (on)
+        std::snprintf(buf, sizeof(buf), "\xE2\x88\x92%.1f", double(gr));
     else
-        std::snprintf(buf, sizeof(buf), "GR \xE2\x88\x92%.1f", double(gr));
-    g.text(buf, r.right(), r.y + 15.f, {10.f, Font::Sc, col::textDim, Align::Right});
+        std::snprintf(buf, sizeof(buf), "0.0");
+    g.text(buf, r.right(), r.y + 6.5f, {12.5f, Font::ScSemi, on ? col::duck : col::textMute, Align::Right});
+    const float by = r.y + 16.f, bh = 10.f;
+    g.fillRR(r.x, by, r.w, bh, 2.f, col::ink0);
+    if (gr > 0.01f)
+        g.fillRR(r.x + r.w - r.w * gr / kRange, by, r.w * gr / kRange, bh, 2.f, col::duck);
+    for (float db = 6.f; db < kRange; db += 6.f) {
+        const float tx = std::round(r.right() - r.w * db / kRange) + 0.5f;
+        g.line(tx, by + 1.f, tx, by + bh - 1.f, col::ink0.withAlpha(0.55f), 1.f);
+    }
+    g.text("36", r.x, r.y + 33.f, {9.5f, Font::Sc, col::textDim, Align::Left});
+    g.text("0", r.right(), r.y + 33.f, {9.5f, Font::Sc, col::textDim, Align::Right});
 }
 
 }} // namespace kick::ui

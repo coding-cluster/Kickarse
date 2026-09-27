@@ -34,7 +34,7 @@ struct MenuItem {
     static MenuItem head(std::string s) { MenuItem m; m.label = std::move(s); m.header = true; return m; }
 };
 
-enum class Img { KnobHero, KnobSmall, Grain };
+enum class Img { KnobHero, KnobSmall, Grain, SwitchRate };
 
 // What widgets can ask of the view.
 class Services {
@@ -95,6 +95,8 @@ public:
     virtual void wheel(const Pointer&, float /*notches*/) {}
     virtual void context(const Pointer&) {}
     virtual void move(const Pointer&) {}              // hover motion
+    // false: move() calls sv.repaint() itself when the hover state it draws changes
+    virtual bool repaintsOnMove() const { return true; }
     virtual void leave() {}
     virtual bool key(unsigned /*key*/, const Pointer&) { return false; }
     virtual DGL_NAMESPACE::MouseCursor cursor(const Pointer&) const { return DGL_NAMESPACE::kMouseCursorArrow; }

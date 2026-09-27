@@ -8,14 +8,17 @@
 //   KICKARSE_UI_SNAPSHOT_EXIT=1      exit the (standalone) process after writing the snapshot
 //   KICKARSE_UI_DEMO=1               synthetic Bridge data (implied by KICKARSE_UI_SHOT)
 //   KICKARSE_UI_SELFTEST=<file.txt>  drive the real input path with synthetic events, write a report
+//   KICKARSE_UI_DEBUGLOG=<file.txt>  append sizing, pointer and keyboard (focus, key, char) events
 #include "DistrhoUI.hpp"
 #include "KickarsePlugin.hpp"
 #include "KickarseResources.hpp"
 
 #include "OpenGL-include.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -40,6 +43,21 @@ const kick::res::Resource* findResource(const kick::res::Resource* table, std::s
         if (table[i].name != nullptr && std::strcmp(table[i].name, name) == 0)
             return &table[i];
     return nullptr;
+}
+
+void debugLog(const char* fmt, ...)
+{
+    const char* path = std::getenv("KICKARSE_UI_DEBUGLOG");
+    if (path == nullptr)
+        return;
+    if (std::FILE* f = std::fopen(path, "a")) {
+        va_list args;
+        va_start(args, fmt);
+        std::vfprintf(f, fmt, args);
+        va_end(args);
+        std::fputc('\n', f);
+        std::fclose(f);
+    }
 }
 
 double nowSeconds()
@@ -117,6 +135,7 @@ public:
         };
         img(r.knobHero, "knob_hero@2x", IMAGE_GENERATE_MIPMAPS);
         img(r.knobSmall, "knob_small@2x", IMAGE_GENERATE_MIPMAPS);
+        img(r.switchRate, "switch_rate@2x", IMAGE_GENERATE_MIPMAPS);
         img(r.grain, "grain_256", IMAGE_REPEAT_X | IMAGE_REPEAT_Y);
 
         fView->init();
@@ -129,8 +148,6 @@ public:
         if (shot != nullptr)
             fView->applyDebugState(shot);
 
-        const double host = getScaleFactor();
-        setGeometryConstraints(uint(kick::ui::kBaseW * host), uint(kick::ui::kBaseH * host), true);
         fUserScale = std::fmin(2.f, std::fmax(1.f, userScale));
         applySize();
         fLastIdle = nowSeconds();
@@ -142,7 +159,7 @@ public:
     void hostSetState(const char* key, const char* value) override { setState(key, value); }
 
     // -- WindowHost --------------------------------------------------------------------------
-    void winRepaint() override { repaint(); }
+    void winRepaint() override { requestRepaint(); }
     void winSetCursor(DGL_NAMESPACE::MouseCursor c) override
     {
         if (c != fCursor) {
@@ -156,6 +173,39 @@ public:
         applySize();
     }
     float winUserScale() const override { return fUserScale; }
+    // Embedded windows only get keys once they hold the focus; without this, typing into a text
+    // field (e.g. a new preset's name) went to the host. Holding the focus is not enough either:
+    // the host's message loop may keep keys for its own shortcuts or never turn them into
+    // characters, so on Windows the keyboard is also taken from the thread's message queue while
+    // an entry is open (see keyHookProc).
+    void winGrabKeyboard() override
+    {
+        fKeyboardGrabbed = true;
+        getWindow().focus();
+#ifdef _WIN32
+        installKeyHook();
+        const HWND hwnd = reinterpret_cast<HWND>(getWindow().getNativeWindowHandle());
+        debugLog("keyboard grab: hwnd=%p focus=%p hook=%p", (void*)hwnd, (void*)GetFocus(), (void*)tKeyHook);
+#else
+        debugLog("keyboard grab");
+#endif
+    }
+    void winReleaseKeyboard() override
+    {
+        fKeyboardGrabbed = false;
+        debugLog("keyboard release");
+    }
+
+    ~KickarseUI() override
+    {
+#ifdef _WIN32
+        tKeyUis.erase(std::remove(tKeyUis.begin(), tKeyUis.end(), this), tKeyUis.end());
+        if (tKeyUis.empty() && tKeyHook != nullptr) {
+            UnhookWindowsHookEx(tKeyHook);
+            tKeyHook = nullptr;
+        }
+#endif
+    }
 
 protected:
     // -- DSP/Plugin callbacks -------------------------------------------------------------------
@@ -173,8 +223,13 @@ protected:
         kick::Bridge* bridge = nullptr;
         if (auto* plugin = static_cast<KickarsePlugin*>(getPluginInstancePointer()))
             bridge = &plugin->engine().bridge();
-        if (fView->idle(bridge, dt) || !fSnapshotPath.empty() || fFrames < 12)
+        if (fSizeChecks > 0 && fFrames > 0)
+            enforceUserSize();
+        const bool wantsPaint = fView->idle(bridge, dt);
+        if (!fSnapshotPath.empty() || fFrames < 12)
             repaint();
+        else if (wantsPaint || fRepaintPending)
+            requestRepaint();
     }
 
     void onNanoDisplay() override
@@ -182,6 +237,7 @@ protected:
         const float k = scale();
         fView->paint(k);
         fLastPaint = nowSeconds();
+        fRepaintPending = false;
         ++fFrames;
         if (fFrames == 10) {
             if (const char* path = std::getenv("KICKARSE_UI_SELFTEST")) {
@@ -228,12 +284,119 @@ protected:
         return fView->scroll(float(ev.pos.getX()) / k, float(ev.pos.getY()) / k, float(ev.delta.getY()), ev.mod);
     }
 
-    bool onKeyboard(const KeyboardEvent& ev) override { return fView->keyboard(ev.key, ev.press, ev.mod); }
+    bool onKeyboard(const KeyboardEvent& ev) override
+    {
+        if (ev.press)
+            debugLog("dpf key: key=0x%x keycode=0x%x mod=0x%x", ev.key, ev.keycode, ev.mod);
+        return fView->keyboard(ev.key, ev.press, ev.mod);
+    }
 
-    bool onCharacterInput(const CharacterInputEvent& ev) override { return fView->character(ev.character, ev.mod); }
+    bool onCharacterInput(const CharacterInputEvent& ev) override
+    {
+        debugLog("dpf char: U+%04X mod=0x%x", ev.character, ev.mod);
+        return fView->character(ev.character, ev.mod);
+    }
 
 private:
     float scale() const { return float(getWidth()) / kick::ui::kBaseW; }
+
+#ifdef _WIN32
+    // One WH_GETMESSAGE hook per UI thread, shared by the UIs on it. It sees every message as the
+    // host's loop removes it from the queue, before the host can translate, redirect or swallow
+    // it. While an entry is open, key-downs and characters for our window are handled here
+    // (TranslateMessage first, so the layout, Shift, AltGr and dead keys produce the right
+    // character) and turned into WM_NULL, so neither the host nor pugl sees them twice.
+    static thread_local std::vector<KickarseUI*> tKeyUis;
+    static thread_local HHOOK tKeyHook;
+
+    void installKeyHook()
+    {
+        if (std::find(tKeyUis.begin(), tKeyUis.end(), this) == tKeyUis.end())
+            tKeyUis.push_back(this);
+        if (tKeyHook == nullptr)
+            tKeyHook = SetWindowsHookExW(WH_GETMESSAGE, keyHookProc, nullptr, GetCurrentThreadId());
+    }
+
+    static LRESULT CALLBACK keyHookProc(int code, WPARAM wParam, LPARAM lParam)
+    {
+        if (code == HC_ACTION && wParam == PM_REMOVE) {
+            MSG& m = *reinterpret_cast<MSG*>(lParam);
+            if (m.message == WM_KEYDOWN || m.message == WM_CHAR) {
+                for (KickarseUI* ui : tKeyUis) {
+                    if (ui->fKeyboardGrabbed && ui->ownsWindow(m.hwnd)) {
+                        ui->takeKeyMessage(m);
+                        m.message = WM_NULL;
+                        break;
+                    }
+                }
+            }
+        }
+        return CallNextHookEx(nullptr, code, wParam, lParam);
+    }
+
+    bool ownsWindow(HWND h) const
+    {
+        const HWND own = reinterpret_cast<HWND>(getWindow().getNativeWindowHandle());
+        return own != nullptr && (h == own || IsChild(own, h));
+    }
+
+    static unsigned keyMods()
+    {
+        unsigned m = 0;
+        if (GetKeyState(VK_SHIFT) < 0) m |= DGL_NAMESPACE::kModifierShift;
+        if (GetKeyState(VK_CONTROL) < 0) m |= DGL_NAMESPACE::kModifierControl;
+        if (GetKeyState(VK_MENU) < 0) m |= DGL_NAMESPACE::kModifierAlt;
+        return m;
+    }
+
+    void takeKeyMessage(MSG& m)
+    {
+        using namespace DGL_NAMESPACE;
+        const unsigned mods = keyMods();
+        if (m.message == WM_CHAR) {
+            const unsigned cp = unsigned(m.wParam) & 0xFFFFu;
+            debugLog("hook char: U+%04X mod=0x%x", cp, mods);
+            if (cp < 0xD800 || cp > 0xDFFF)   // no surrogate pairs (the entry takes the BMP only)
+                fView->character(cp, mods);
+            return;
+        }
+        TranslateMessage(&m);   // queues the WM_CHAR / WM_DEADCHAR this key produces
+        const unsigned vk = unsigned(m.wParam);
+        unsigned key = 0;
+        switch (vk) {
+        case VK_BACK:   key = kKeyBackspace; break;
+        case VK_TAB:    key = kKeyTab; break;
+        case VK_RETURN: key = (m.lParam & (1 << 24)) ? unsigned(kKeyPadEnter) : unsigned(kKeyEnter); break;
+        case VK_ESCAPE: key = kKeyEscape; break;
+        case VK_DELETE: key = kKeyDelete; break;
+        case VK_SPACE:  key = kKeySpace; break;
+        case VK_LEFT:   key = kKeyLeft; break;
+        case VK_RIGHT:  key = kKeyRight; break;
+        case VK_UP:     key = kKeyUp; break;
+        case VK_DOWN:   key = kKeyDown; break;
+        case VK_HOME:   key = kKeyHome; break;
+        case VK_END:    key = kKeyEnd; break;
+        default:
+            if ((vk >= 'A' && vk <= 'Z') || (vk >= '0' && vk <= '9'))
+                key = vk >= 'A' ? vk + ('a' - 'A') : vk;   // DGL keys are lowercase
+            break;
+        }
+        debugLog("hook key: vk=0x%x -> key=0x%x mod=0x%x", vk, key, mods);
+        if (key != 0)
+            fView->keyboard(key, true, mods);
+    }
+#endif
+
+    // Every repaint the view asks for goes through here: at most kMaxFps paints per second, the
+    // rest is deferred to the next idle tick (16 ms). Without it each mouse event painted the whole
+    // window, so hovering the editor cost as many full frames as the mouse sent events.
+    void requestRepaint()
+    {
+        if (nowSeconds() - fLastPaint >= 1.0 / kMaxFps - 1e-4)
+            repaint();
+        else
+            fRepaintPending = true;
+    }
 
     // Windows hands out WM_TIMER (our uiIdle) and WM_PAINT only when no input is queued, so a moving
     // mouse starved both and the live displays froze while hovering. Drive the idle tick from input
@@ -250,10 +413,27 @@ private:
 #endif
     }
 
+    uint wantedWidth() const { return uint(std::lround(kick::ui::kBaseW * getScaleFactor() * double(fUserScale))); }
+
+    // Hosts size the editor frame before the UI exists, from DISTRHO_UI_DEFAULT_WIDTH/HEIGHT and
+    // (often) without the display scale factor, then apply that size after we asked for ours, so
+    // the editor opened smaller than the same "100 %" picked later from the menu. Once the window
+    // is up, check the size a few times and ask again when it does not match the saved UI size.
+    void enforceUserSize()
+    {
+        --fSizeChecks;
+        const uint w = wantedWidth();
+        if (getWindow().getWidth() + 1 < w || getWindow().getWidth() > w + 1)
+            applySize();
+    }
+
     void applySize()
     {
-        const double f = getScaleFactor() * double(fUserScale);
-        const uint w = uint(std::lround(kick::ui::kBaseW * f)), h = uint(std::lround(kick::ui::kBaseH * f));
+        const double host = getScaleFactor();
+        // the minimum follows the display scale factor, which some hosts only announce after opening
+        setGeometryConstraints(uint(std::lround(kick::ui::kBaseW * host)), uint(std::lround(kick::ui::kBaseH * host)), true);
+        const double f = host * double(fUserScale);
+        const uint w = wantedWidth(), h = uint(std::lround(kick::ui::kBaseH * f));
         setSize(w, h);
         // When the host announces a scale factor, DPF creates the window already scaled; setSize then
         // changes nothing, no configure event arrives and the widget keeps its unscaled size. NanoVG and
@@ -293,12 +473,21 @@ private:
     float  fUserScale = 1.f;
     double fLastIdle = 0.0;
     double fLastPaint = 0.0;
+    bool   fRepaintPending = false;
+    static constexpr double kMaxFps = 60.0;
     DGL_NAMESPACE::MouseCursor fCursor = DGL_NAMESPACE::kMouseCursorArrow;
     std::string fSnapshotPath;
     int    fFrames = 0;
+    bool   fKeyboardGrabbed = false;   // a text/value entry is open (winGrabKeyboard)
+    int    fSizeChecks = 8;   // idle ticks after the first paint that re-assert the saved size
 
     DISTRHO_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(KickarseUI)
 };
+
+#ifdef _WIN32
+thread_local std::vector<KickarseUI*> KickarseUI::tKeyUis;
+thread_local HHOOK KickarseUI::tKeyHook = nullptr;
+#endif
 
 // -----------------------------------------------------------------------------------------------
 

@@ -28,11 +28,13 @@ public:
     virtual void winSetCursor(DGL_NAMESPACE::MouseCursor c) = 0;
     virtual void winSetUserScale(float s) = 0;   // resize the window to 1080·s·host × 660·s·host
     virtual float winUserScale() const = 0;
+    virtual void winGrabKeyboard() {}   // a text/value entry opened: take the keyboard from the host
+    virtual void winReleaseKeyboard() {} // ... and it closed
 };
 
 struct Resources {
     DGL_NAMESPACE::NanoVG::FontId sc = -1, scSemi = -1, exp = -1;
-    DGL_NAMESPACE::NanoImage knobHero, knobSmall, grain;
+    DGL_NAMESPACE::NanoImage knobHero, knobSmall, grain, switchRate;
 };
 
 class MenuOverlay;
@@ -132,11 +134,19 @@ private:
     void    updateCursorAndHint(const Pointer& p);
     void    commitEntry();
     void    cancelEntry();
+    void    entryKey(unsigned key, const Pointer& p);   // editing keys while an entry is open
+    void    entryInsert(const std::string& s);
+    void    entryErase(std::size_t from, std::size_t to);
+    std::size_t entryStopAt(float x) const;              // nearest caret position to x
+    bool    caretPhaseOn() const;
     void    paintChassis(Gfx& g);
     void    paintTooltip(Gfx& g);
     void    pollBridge(Bridge* bridge, double dt);
     void    handleCapture(Bridge* bridge);
     void    finishCapture(const float* buf, int bins);
+    void    saveUserPreset(const std::string& name, bool overwrite);
+    static bool liveMoved(const Live& a, const Live& b, bool atRest);
+    bool    envelopeAtRest() const;   // Sync mode, host stopped: the editor shows no playhead
 
     HostIO&      host_;
     WindowHost&  win_;
@@ -178,17 +188,31 @@ private:
         bool open = false;
         int  param = -1;          // -1 = free text entry
         std::string text;
-        bool selectAll = true;
+        // caret and selection as UTF-8 byte offsets on code point boundaries; the selection is
+        // [min(anchor, caret), max(anchor, caret)), empty when they are equal
+        std::size_t caret = 0, anchor = 0;
+        bool dragging = false;    // mouse-selecting inside the field
+        double blinkFrom = 0.0;   // caret blink restarts (visible) on every edit or move
         float cx = 0.f, cy = 0.f, width = 0.f;
+        RectF box;                // where the field was last drawn: clicks inside it edit, not commit
+        std::vector<std::size_t> stops;   // caret positions (byte offsets) as last drawn ...
+        std::vector<float> stopX;         // ... and their x
         std::function<void(const std::string&)> commit;
     } entry_;
 
+    // Live displays, blinking carets and fades repaint at most this often; interaction is immediate.
+    static constexpr double kAmbientFps = 30.0;
+
     double clock_ = 0.0;
     bool   dirty_ = true;
+    Live   painted_;              // live_ as of the last paint, to skip repaints nothing would change
+    double paintedAt_ = -1.0;
+    bool   paintedCaretOn_ = false;
     std::uint32_t lastRevision_ = 0;
     std::uint32_t lastTrig_ = 0, lastNotes_ = 0;
     bool   firstPoll_ = true;
     float  savedFlash_ = 0.f;
+    std::string saveMsg_ = "Saved";   // header status next to Save: "Saved", "Name taken", ...
     std::string clipboard_;
     bool   hasClip_ = false;
     float  clipValue_ = 0.f;

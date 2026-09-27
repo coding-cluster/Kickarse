@@ -138,6 +138,58 @@ void EnvelopeEditor::drawPolyline(Gfx& g, const std::vector<EditorPoint>& pts, c
     vg.lineCap(NVG::BUTT);
 }
 
+void EnvelopeEditor::drawSmoothed(Gfx& g, const Rgba& c)
+{
+    // Dotted: the curve the audio actually follows once Smooth is applied. The DSP runs a one-pole
+    // low-pass over the envelope value, sample by sample (Engine.cpp, envSmoothMs); run the same
+    // filter in real time over the drawn curve, resampled to one value per pixel column, for two
+    // cycles so the start carries over from the end of the previous one (a loop, or a one-shot
+    // holding its last value).
+    const Model& m = sv.model();
+    const int mode = m.ivalue(kParamMode);
+    const bool continuous = (mode == kModeSpectral || mode == kModeRing) && m.ivalue(kParamTrigSource) == kTrigContinuous;
+    const double tauMs = envSmoothMs(m.value(kParamSmooth) * 0.01f);
+    const double cycleMs = double(sv.live().cycleSeconds) * 1000.0;
+    if (continuous || !(tauMs > 0.0) || !(cycleMs > 0.0) || pts_.size() < 2)
+        return;
+    const int M = std::max(2, int(plot_.w));
+    smoothIn_.resize(std::size_t(M) + 1);
+    std::size_t j = 0;
+    for (int i = 0; i <= M; ++i) {   // pts_ is ordered in t; a vertical jump is two points at one t
+        const float t = float(i) / float(M);
+        while (j + 2 < pts_.size() && pts_[j + 1].t <= t)
+            ++j;
+        const EditorPoint &p0 = pts_[j], &p1 = pts_[j + 1];
+        const float span = p1.t - p0.t;
+        smoothIn_[std::size_t(i)] = span > 1e-9f ? p0.v + (p1.v - p0.v) * std::clamp((t - p0.t) / span, 0.f, 1.f) : p1.v;
+    }
+    constexpr int kSub = 4;   // filter steps per pixel column
+    const float a = float(1.0 - std::exp(-cycleMs / double(M * kSub) / tauMs));
+    smooth_.resize(std::size_t(M) + 1);
+    float y = smoothIn_.back(), dev = 0.f;
+    for (int pass = 0; pass < 2; ++pass) {
+        for (int i = 0; i <= M; ++i) {
+            const float v = smoothIn_[std::size_t(i)];
+            if (i > 0) {
+                const float v0 = smoothIn_[std::size_t(i - 1)];
+                for (int k = 1; k <= kSub; ++k)
+                    y += a * (v0 + (v - v0) * float(k) / float(kSub) - y);
+            }
+            if (pass == 1) {
+                smooth_[std::size_t(i)] = {float(i) / float(M), y};
+                if (i >= 2)   // a jump the filter settles within a pixel or two is not worth a line
+                    dev = std::max(dev, std::fabs(y - v));
+            }
+        }
+    }
+    if (dev * plot_.h < 0.75f)   // nothing a pixel would show
+        return;
+    std::vector<float> xy;
+    xy.reserve(smooth_.size() * 2);
+    for (const auto& p : smooth_) { xy.push_back(X(p.t)); xy.push_back(Y(p.v)); }
+    g.dashedPolyline(xy.data(), int(smooth_.size()), 1.2f, 2.6f, c.withAlpha(0.9f), 1.6f);
+}
+
 void EnvelopeEditor::drawGrid(Gfx& g, bool labels)
 {
     const Model& m = sv.model();
@@ -191,18 +243,24 @@ void EnvelopeEditor::drawWaves(Gfx& g)
     const Live& l = sv.live();
     const ViewState& vs = sv.model().view;
     const int n = Live::kBins;
+    // every other bin, as the peak of it and its neighbours: half the path points (these paths are
+    // a large share of each frame) and no visible loss, the bins are already smoothed over ±6 ms
+    auto val = [&](const float* a, int i) {
+        const float v = std::max(a[std::clamp(i - 1, 0, n - 1)], std::max(a[std::min(i, n - 1)], a[std::min(i + 1, n - 1)]));
+        return Y(std::min(1.f, v));
+    };
     auto path = [&](const float* a) {
         vg.beginPath();
         vg.moveTo(X(0.f), Y(0.f));
-        for (int i = 0; i <= n; ++i)
-            vg.lineTo(X(float(i) / float(n)), Y(std::min(1.f, a[std::min(i, n - 1)])));
+        for (int i = 0; i <= n; i += 2)
+            vg.lineTo(X(float(i) / float(n)), val(a, i));
         vg.lineTo(X(1.f), Y(0.f));
         vg.closePath();
     };
     auto edge = [&](const float* a) {
         vg.beginPath();
-        for (int i = 0; i <= n; ++i) {
-            const float x = X(float(i) / float(n)), y = Y(std::min(1.f, a[std::min(i, n - 1)]));
+        for (int i = 0; i <= n; i += 2) {
+            const float x = X(float(i) / float(n)), y = val(a, i);
             if (i == 0) vg.moveTo(x, y); else vg.lineTo(x, y);
         }
     };
@@ -421,6 +479,8 @@ void EnvelopeEditor::paint(Gfx& g)
         for (const auto& p : pts_) { xy.push_back(X(p.t)); xy.push_back(Y(1.f - eff * (1.f - p.v))); }
         g.dashedPolyline(xy.data(), int(pts_.size()), 3.f, 3.f, bc.withAlpha(0.55f), 1.f);
     }
+    if (!morphing_)
+        drawSmoothed(g, bc);
     if (l.trigFlash > 0.02f && m.ivalue(kParamMode) != kModeSync) {
         float t0 = map.toTimeline(0.f);
         g.fillRect(X(t0) - 1.f, plot_.y, 2.f, plot_.h, col::kick.withAlpha(0.5f * l.trigFlash));

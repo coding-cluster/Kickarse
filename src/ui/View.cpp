@@ -3,6 +3,7 @@
 #include "View.h"
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -64,12 +65,49 @@ void caption(Gfx& g, const char* s, float x, float y, Align a = Align::Left, flo
     g.text(s, x, y, {size, Font::Sc, col::textDim, a});
 }
 
-std::string fmtMs(float ms)
+// Text-entry caret movement over UTF-8: by code point, and by word the way Windows edit fields do
+// it (Ctrl+Right lands at the start of the next word, Ctrl+Left at the start of this/previous one).
+bool utf8Cont(char c) { return (static_cast<unsigned char>(c) & 0xC0) == 0x80; }
+
+std::size_t prevCp(const std::string& s, std::size_t i)
 {
-    char buf[32];
-    if (ms < 1000.f) std::snprintf(buf, sizeof(buf), "%.0f ms", double(ms));
-    else std::snprintf(buf, sizeof(buf), "%.2f s", double(ms / 1000.f));
-    return buf;
+    if (i == 0) return 0;
+    do --i; while (i > 0 && utf8Cont(s[i]));
+    return i;
+}
+
+std::size_t nextCp(const std::string& s, std::size_t i)
+{
+    if (i >= s.size()) return s.size();
+    do ++i; while (i < s.size() && utf8Cont(s[i]));
+    return i;
+}
+
+int charClass(char c)   // 0 space, 1 word (letters, digits, anything non-ASCII), 2 punctuation
+{
+    const unsigned char u = static_cast<unsigned char>(c);
+    if (u == ' ' || u == '\t') return 0;
+    return (u >= 0x80 || std::isalnum(u)) ? 1 : 2;
+}
+
+std::size_t nextWord(const std::string& s, std::size_t i)
+{
+    if (i < s.size()) {
+        const int c = charClass(s[i]);
+        while (i < s.size() && charClass(s[i]) == c) ++i;   // continuation bytes are class 1 too
+    }
+    while (i < s.size() && charClass(s[i]) == 0) ++i;
+    return i;
+}
+
+std::size_t prevWord(const std::string& s, std::size_t i)
+{
+    while (i > 0 && charClass(s[i - 1]) == 0) --i;
+    if (i > 0) {
+        const int c = charClass(s[i - 1]);
+        while (i > 0 && charClass(s[i - 1]) == c) --i;
+    }
+    return i;
 }
 
 } // namespace
@@ -94,7 +132,12 @@ void View::setEditorBackend(EditorBackend* b)
 
 const DGL_NAMESPACE::NanoImage& View::image(Img i) const
 {
-    return i == Img::KnobHero ? res_.knobHero : i == Img::KnobSmall ? res_.knobSmall : res_.grain;
+    switch (i) {
+    case Img::KnobHero:   return res_.knobHero;
+    case Img::KnobSmall:  return res_.knobSmall;
+    case Img::SwitchRate: return res_.switchRate;
+    default:              return res_.grain;
+    }
 }
 
 void View::init()
@@ -212,7 +255,7 @@ void View::buildHeader()
     add<IconButton>(*this, Icon::Save, RectF {682.f, 10.f, 32.f, 24.f}, [this] { savePreset(false); }, "Save preset (Ctrl+S)");
     add<Decor>(*this, [this](Gfx& g) {
         if (savedFlash_ > 0.f)
-            g.text("Saved", 726.f, 22.f, {11.f, Font::Sc, col::duck.withAlpha(std::min(1.f, savedFlash_ * 2.f)), Align::Left});
+            g.text(saveMsg_.c_str(), 726.f, 22.f, {11.f, Font::Sc, (saveMsg_ == "Saved" ? col::duck : col::kick).withAlpha(std::min(1.f, savedFlash_ * 2.f)), Align::Left});
     });
     auto* undo = add<IconButton>(*this, Icon::Undo, RectF {736.f, 10.f, 28.f, 24.f}, [this] { model_.undo(); }, "Undo (Ctrl+Z)");
     undo->isDisabled = [this] { return !model_.canUndo(); };
@@ -241,32 +284,25 @@ void View::buildLeft()
     add<Segmented>(*this, RectF {140.f, 54.f, 88.f, 20.f}, std::vector<std::string> {"Note", "ms"},
                    [this] { return model_.ivalue(kParamTimeMode); }, [this](int i) { model_.setOnce(kParamTimeMode, float(i)); }, true)
         ->hints = {"Cycle length as a note value, locked to the tempo", "Cycle length in milliseconds"};
-    auto* rate = add<RateStepper>(*this, RectF {kLX, 76.f, kLW, 38.f});
+    auto* rate = add<RateSwitch>(*this, RectF {kLX, 76.f, kLW, 100.f});
     rate->visibleIf = [this] { return model_.ivalue(kParamTimeMode) == kTimeSync; };
-    auto* len = add<ValueField>(*this, kParamLengthMs, RectF {kLX, 76.f, kLW, 38.f}, "Length");
+    auto* len = add<ValueField>(*this, kParamLengthMs, RectF {kLX, 100.f, kLW, 38.f}, "Length");
     len->visibleIf = [this] { return model_.ivalue(kParamTimeMode) == kTimeFree; };
     add<Decor>(*this, [this](Gfx& g) {
-        if (model_.ivalue(kParamTimeMode) == kTimeFree) {
-            caption(g, "Free time: the grid divides one cycle.", kLX, 126.f);
-            return;
-        }
-        const int ri = std::clamp(model_.ivalue(kParamRate), 0, kNumRates - 1);
-        const float ms = float(kRates[ri].beats * 60.0 / double(std::max(1.f, live_.bpm)) * 1000.0);
-        char buf[96];
-        std::snprintf(buf, sizeof(buf), "%s at %.0f bpm = %s", kRateLabels[ri], double(live_.bpm), fmtMs(ms).c_str());
-        caption(g, buf, kLX, 126.f);
+        if (model_.ivalue(kParamTimeMode) == kTimeFree)
+            caption(g, "Free time: the grid divides one cycle.", kLX, 152.f);
     });
-    auto* play = add<Segmented>(*this, RectF {kLX, 140.f, kLW, 26.f}, std::vector<std::string> {"Loop", "One-shot"},
+    auto* play = add<Segmented>(*this, RectF {kLX, 184.f, kLW, 26.f}, std::vector<std::string> {"Loop", "One-shot"},
                                 [this] { return model_.ivalue(kParamPlayMode); }, [this](int i) { model_.setOnce(kParamPlayMode, float(i)); }, true);
     play->icons = {Icon::Loop, Icon::OneShot};
     play->hints = {"Loop: repeats every cycle", "One-shot: plays once per trigger, then holds"};
     add<Decor>(*this, [this](Gfx& g) {
-        g.groove(12.f, 182.f, 232.f, 182.f);
-        title(g, "Trigger", kLX, 200.f);
-        g.lamp(kLX + kLW - 4.f, 200.f, live_.trigFlash > 0.02f ? live_.trigFlash : 0.f, col::kick, 5.f);
-        g.text("hits", kLX + kLW - 14.f, 200.5f, {10.f, Font::Sc, col::textDim, Align::Right});
+        g.groove(12.f, 226.f, 232.f, 226.f);
+        title(g, "Trigger", kLX, 244.f);
+        g.lamp(kLX + kLW - 4.f, 244.f, live_.trigFlash > 0.02f ? live_.trigFlash : 0.f, col::kick, 5.f);
+        g.text("hits", kLX + kLW - 14.f, 244.5f, {10.f, Font::Sc, col::textDim, Align::Right});
     });
-    auto* mode = add<Segmented>(*this, RectF {kLX, 210.f, kLW, 26.f}, std::vector<std::string> {"Sync", "MIDI", "Audio", "Spectral", "Ring"},
+    auto* mode = add<Segmented>(*this, RectF {kLX, 254.f, kLW, 26.f}, std::vector<std::string> {"Sync", "MIDI", "Audio", "Spectral", "Ring"},
                                 [this] { return model_.ivalue(kParamMode); }, [this](int i) { model_.setOnce(kParamMode, float(i)); });
     mode->hints = {"Sync: the cycle follows the host transport", "MIDI: each note restarts the cycle",
                    "Audio: sidechain transients restart the cycle", "Spectral: cut only the frequencies the kick occupies",
@@ -581,7 +617,7 @@ void View::buildRight()
     (void)og;
     add<LampButton>(*this, "Delta", RectF {kRX + kRW - 66.f, 556.f, 66.f, 22.f}, [this] { return model_.on(kParamDelta); },
                     [this] { model_.toggle(kParamDelta); }, col::duck, "Delta: hear only what is being removed");
-    add<GrMeter>(*this, RectF {kRX + kRW - 66.f, 592.f, 66.f, 5.f});
+    add<GrMeter>(*this, RectF {kRX + kRW - 66.f, 586.f, 66.f, 40.f});
 }
 
 void View::buildFooter()
@@ -699,7 +735,10 @@ void View::openEntry(int paramId)
     else
         std::snprintf(buf, sizeof(buf), "%g", std::round(double(v) * 100.0) / 100.0);
     entry_.text = buf;
-    entry_.selectAll = true;
+    entry_.anchor = 0;
+    entry_.caret = entry_.text.size();
+    entry_.blinkFrom = clock_;
+    win_.winGrabKeyboard();
     repaint();
 }
 
@@ -710,26 +749,125 @@ void View::openTextEntry(const std::string& initial, float cx, float cy, float w
     entry_.open = true;
     entry_.param = -1;
     entry_.text = initial;
-    entry_.selectAll = true;
+    entry_.anchor = 0;
+    entry_.caret = entry_.text.size();
+    entry_.blinkFrom = clock_;
     entry_.cx = cx;
     entry_.cy = cy;
     entry_.width = width;
     entry_.commit = std::move(commit);
+    win_.winGrabKeyboard();
     repaint();
 }
 
 void View::drawEntry(Gfx& g, float cx, float cy, float size)
 {
-    const std::string t = entry_.text.empty() ? std::string(" ") : entry_.text;
-    const float tw = g.measure(t.c_str(), size, Font::ScSemi);
+    const std::string& s = entry_.text;
+    const float tw = s.empty() ? 0.f : g.measure(s.c_str(), size, Font::ScSemi);
     const float w = std::max(entry_.param < 0 ? entry_.width : 56.f, tw + 18.f);
+    entry_.box = {cx - w * 0.5f, cy - 10.f, w, 20.f};
     g.fillRR(cx - w * 0.5f, cy - 10.f, w, 20.f, 3.f, col::ink0);
     g.strokeRR(cx - w * 0.5f + 0.5f, cy - 9.5f, w - 1.f, 19.f, 3.f, col::duck);
-    if (entry_.selectAll && !entry_.text.empty())
-        g.fillRR(cx - tw * 0.5f - 2.f, cy - 7.f, tw + 4.f, 14.f, 2.f, col::duck.withAlpha(0.3f));
-    g.text(t.c_str(), cx, cy, {size, Font::ScSemi, col::textHi, Align::Center});
-    if (!entry_.selectAll && std::fmod(clock_, 1.0) < 0.56)
-        g.line(cx + tw * 0.5f + 1.5f, cy - 6.f, cx + tw * 0.5f + 1.5f, cy + 6.f, col::duck, 1.2f);
+    // caret stops (every code point boundary) and their x, for drawing and for mouse hits
+    const float x0 = cx - tw * 0.5f;
+    entry_.stops.clear();
+    entry_.stopX.clear();
+    for (std::size_t i = 0;; i = nextCp(s, i)) {
+        entry_.stops.push_back(i);
+        entry_.stopX.push_back(i == 0 ? x0 : i >= s.size() ? x0 + tw : x0 + g.measure(s.substr(0, i).c_str(), size, Font::ScSemi));
+        if (i >= s.size())
+            break;
+    }
+    auto xAt = [&](std::size_t b) {
+        const auto it = std::lower_bound(entry_.stops.begin(), entry_.stops.end(), b);
+        return entry_.stopX[std::size_t(std::min(it - entry_.stops.begin(), std::ptrdiff_t(entry_.stopX.size()) - 1))];
+    };
+    if (entry_.caret != entry_.anchor) {
+        const float a = xAt(std::min(entry_.caret, entry_.anchor)), b = xAt(std::max(entry_.caret, entry_.anchor));
+        g.fillRR(a - 1.f, cy - 7.f, b - a + 2.f, 14.f, 2.f, col::duck.withAlpha(0.3f));
+    }
+    if (!s.empty())
+        g.text(s.c_str(), cx, cy, {size, Font::ScSemi, col::textHi, Align::Center});
+    if (entry_.caret == entry_.anchor && caretPhaseOn()) {
+        const float x = xAt(entry_.caret) + 0.5f;
+        g.line(x, cy - 6.f, x, cy + 6.f, col::duck, 1.2f);
+    }
+}
+
+bool View::caretPhaseOn() const
+{
+    return std::fmod(clock_ - (entry_.open ? entry_.blinkFrom : 0.0), 1.0) < 0.56;
+}
+
+std::size_t View::entryStopAt(float x) const
+{
+    std::size_t best = entry_.text.size();
+    float bestD = 1e9f;
+    for (std::size_t i = 0; i < entry_.stops.size(); ++i) {
+        const float d = std::fabs(entry_.stopX[i] - x);
+        if (d < bestD) { bestD = d; best = entry_.stops[i]; }
+    }
+    return best;
+}
+
+void View::entryErase(std::size_t from, std::size_t to)
+{
+    if (to > from)
+        entry_.text.erase(from, to - from);
+    entry_.caret = entry_.anchor = from;
+}
+
+void View::entryInsert(const std::string& s)
+{
+    const std::size_t lo = std::min(entry_.caret, entry_.anchor), hi = std::max(entry_.caret, entry_.anchor);
+    if (entry_.text.size() - (hi - lo) + s.size() > 64)
+        return;
+    entryErase(lo, hi);
+    entry_.text.insert(lo, s);
+    entry_.caret = entry_.anchor = lo + s.size();
+}
+
+void View::entryKey(unsigned key, const Pointer& p)
+{
+    using namespace DGL_NAMESPACE;
+    Entry& e = entry_;
+    const std::string& s = e.text;
+    const std::size_t lo = std::min(e.caret, e.anchor), hi = std::max(e.caret, e.anchor);
+    const bool sel = lo != hi;
+    e.blinkFrom = clock_;
+    auto moveTo = [&](std::size_t to) {   // Shift extends the selection, otherwise it collapses
+        e.caret = to;
+        if (!p.shift)
+            e.anchor = to;
+    };
+    switch (key) {
+    case kKeyEnter: case kKeyPadEnter: commitEntry(); return;
+    case kKeyEscape: cancelEntry(); return;
+    case kKeyLeft:
+        if (sel && !p.shift && !p.ctrl) moveTo(lo);
+        else moveTo(p.ctrl ? prevWord(s, e.caret) : prevCp(s, e.caret));
+        return;
+    case kKeyRight:
+        if (sel && !p.shift && !p.ctrl) moveTo(hi);
+        else moveTo(p.ctrl ? nextWord(s, e.caret) : nextCp(s, e.caret));
+        return;
+    case kKeyHome: moveTo(0); return;
+    case kKeyEnd: moveTo(s.size()); return;
+    case kKeyBackspace:
+        if (sel) entryErase(lo, hi);
+        else entryErase(p.ctrl ? prevWord(s, e.caret) : prevCp(s, e.caret), e.caret);
+        return;
+    case kKeyDelete:
+        if (sel) entryErase(lo, hi);
+        else entryErase(e.caret, p.ctrl ? nextWord(s, e.caret) : nextCp(s, e.caret));
+        return;
+    default:
+        if (p.ctrl && !p.alt && (key == 'a' || key == 'A')) {   // not AltGr (Ctrl+Alt): that types
+            e.anchor = 0;
+            e.caret = s.size();
+        }
+        return;   // the field owns the keyboard while it is open
+    }
 }
 
 void View::drawTextEntry(Gfx& g)
@@ -744,6 +882,7 @@ void View::commitEntry()
         return;
     Entry e = std::move(entry_);
     entry_ = {};
+    win_.winReleaseKeyboard();   // before commit: it may open a new entry ("Name taken")
     if (e.param < 0) {
         if (e.commit) {
             std::string t = e.text;
@@ -762,6 +901,7 @@ void View::commitEntry()
 void View::cancelEntry()
 {
     entry_ = {};
+    win_.winReleaseKeyboard();
     repaint();
 }
 
@@ -841,42 +981,53 @@ void View::loadPreset(const std::string& id)
 
 void View::savePreset(bool saveAs)
 {
-    auto doSave = [this](const std::string& name, bool overwrite) {
-        if (name.empty())
-            return;
-        PresetData d = PresetData::defaults();
-        d.name = name;
-        d.category = model_.presetCategory.empty() ? "Sidechain" : model_.presetCategory;
-        d.author = "User";
-        for (int i = 0; i < kParamCount; ++i) {
-            d.params[i] = model_.value(i);
-            d.has[i] = i != kParamBypass;
-        }
-        d.envA = model_.env(0).serialize();
-        d.envB = model_.env(1).serialize();
-        std::string err;
-        if (!presets_.saveUser(d, overwrite, &err)) {
-            // name taken by another user preset: ask again with a suffix
-            (void)err;
-            return;
-        }
-        for (const PresetEntry& e : presets_.entries())
-            if (!e.isFactory && e.name == d.name && e.category == d.category)
-                model_.presetId = e.id;
-        model_.presetName = d.name;
-        model_.presetCategory = d.category;
-        model_.dirty = false;
-        model_.pushPresetState();
-        savedFlash_ = 1.f;
-        repaint();
-    };
     const bool isUser = model_.presetId.rfind("user:", 0) == 0;
     if (!saveAs && isUser) {
-        doSave(model_.presetName, true);
+        saveUserPreset(model_.presetName, true);
         return;
     }
     const std::string suggestion = isUser ? model_.presetName : model_.presetName + " (mine)";
-    openTextEntry(suggestion, 468.f, 22.f, 220.f, [doSave](const std::string& n) { doSave(n, false); });
+    openTextEntry(suggestion, 468.f, 22.f, 220.f, [this](const std::string& n) { saveUserPreset(n, false); });
+}
+
+void View::saveUserPreset(const std::string& name, bool overwrite)
+{
+    if (name.empty())
+        return;
+    PresetData d = PresetData::defaults();
+    d.name = name;
+    d.category = model_.presetCategory.empty() ? "Sidechain" : model_.presetCategory;
+    d.author = "User";
+    for (int i = 0; i < kParamCount; ++i) {
+        d.params[i] = model_.value(i);
+        d.has[i] = i != kParamBypass;
+    }
+    d.envA = model_.env(0).serialize();
+    d.envB = model_.env(1).serialize();
+    std::string err;
+    if (!presets_.saveUser(d, overwrite, &err)) {
+        savedFlash_ = 1.f;
+        if (!overwrite && err.find("already exists") != std::string::npos) {
+            // name taken by another user preset: say so and ask again, caret at the end of the name
+            saveMsg_ = "Name taken";
+            openTextEntry(name, 468.f, 22.f, 220.f, [this](const std::string& n) { saveUserPreset(n, false); });
+            entry_.anchor = entry_.caret;
+        } else {
+            saveMsg_ = "Save failed";
+        }
+        repaint();
+        return;
+    }
+    for (const PresetEntry& e : presets_.entries())
+        if (!e.isFactory && e.name == d.name && e.category == d.category)
+            model_.presetId = e.id;
+    model_.presetName = d.name;
+    model_.presetCategory = d.category;
+    model_.dirty = false;
+    model_.pushPresetState();
+    saveMsg_ = "Saved";
+    savedFlash_ = 1.f;
+    repaint();
 }
 
 void View::setScale(float s)
@@ -1012,6 +1163,11 @@ void View::pollBridge(Bridge* br, double dt)
         }
         l.recState = br->recState.load(std::memory_order_acquire);
         l.recProgress = br->recProgress.load(std::memory_order_relaxed);
+        // Stopped in Sync mode the envelope free-runs (edits stay audible) but the editor shows it
+        // at rest (no playhead, no depth ring); show no gain reduction either unless something is
+        // audible, so an open editor on a stopped, silent project does not repaint at all.
+        if (envelopeAtRest() && l.outPeakDb < -90.f)
+            l.grDb = 0.f;
     }
     // threshold meter: peak hold with a 40 dB/s fall
     l.scPeakHoldDb = std::max(l.scLevelDb, l.scPeakHoldDb - 40.f * fdt);
@@ -1121,16 +1277,53 @@ bool View::idle(Bridge* bridge, double dt)
         if (w->visible && w->animating())
             anim = true;
     }
-    const bool liveMotion = live_.playing || model_.ivalue(kParamMode) != kModeSync || live_.trigFlash > 0.f || live_.noteFlash > 0.f
-                         || live_.recState != 0 || demoMode_;
     const bool changed = model_.revision() != lastRevision_;
     lastRevision_ = model_.revision();
     const bool tooltipDue = settings_.tooltips && hot_ != nullptr && clock_ - hoverSince_ > 0.7 && clock_ - hoverSince_ < 0.7 + dt * 1.5;
-    if (anim || liveMotion || changed || dirty_ || savedFlash_ > 0.f || entry_.open || tooltipDue) {
+    // Interaction (hover fades, edits, explicit repaints) paints right away.
+    if (anim || changed || dirty_ || tooltipDue) {
         dirty_ = false;
         return true;
     }
-    return false;
+    // Everything else is ambient and painted at most kAmbientFps: live displays only when what
+    // they show actually moved since the last paint (a stopped transport or a silent sidechain
+    // costs nothing), text carets only when they blink.
+    const bool caretOn = caretPhaseOn();
+    const bool caretDue = (entry_.open || browser_->isOpen()) && caretOn != paintedCaretOn_;
+    const bool ambient = demoMode_ || savedFlash_ > 0.f || caretDue || liveMoved(live_, painted_, envelopeAtRest());
+    return ambient && clock_ - paintedAt_ >= 1.0 / kAmbientFps - 1e-3;
+}
+
+bool View::envelopeAtRest() const
+{
+    return !live_.playing && model_.ivalue(kParamMode) == kModeSync;
+}
+
+bool View::liveMoved(const Live& a, const Live& b, bool atRest)
+{
+    // tolerances sit below what a paint could show at 2x (a tenth of a pixel, 0.05 dB)
+    auto near = [](float x, float y, float eps) { return std::fabs(x - y) <= eps; };
+    auto nearAll = [&](const float* x, const float* y, int n, float eps) {
+        for (int i = 0; i < n; ++i)
+            if (!near(x[i], y[i], eps))
+                return false;
+        return true;
+    };
+    if (a.active != b.active || a.playing != b.playing || a.timeSigNum != b.timeSigNum || a.timeSigDen != b.timeSigDen
+        || a.lastNote != b.lastNote || a.lastVelocity != b.lastVelocity || a.recState != b.recState)
+        return true;
+    // at rest the playhead and the envelope value are not drawn
+    if (!atRest && (!near(a.phase, b.phase, 1e-4f) || !near(a.valueA, b.valueA, 1e-3f) || !near(a.valueB, b.valueB, 1e-3f)))
+        return true;
+    if (!near(a.grDb, b.grDb, 0.05f) || !near(a.bpm, b.bpm, 0.05f) || !near(a.cycleSeconds, b.cycleSeconds, 1e-4f)
+        || !near(a.scLevelDb, b.scLevelDb, 0.05f) || !near(a.scPeakHoldDb, b.scPeakHoldDb, 0.05f)
+        || !near(a.outPeakDb, b.outPeakDb, 0.05f) || !near(a.recProgress, b.recProgress, 1e-3f)
+        || !near(a.trigFlash, b.trigFlash, 1e-3f) || !near(a.noteFlash, b.noteFlash, 1e-3f))
+        return true;
+    return !nearAll(a.mainWave, b.mainWave, Live::kBins, 2e-3f) || !nearAll(a.extWave, b.extWave, Live::kBins, 2e-3f)
+        || !nearAll(a.outWave, b.outWave, Live::kBins, 2e-3f) || !nearAll(a.ringWave, b.ringWave, Live::kBins, 2e-3f)
+        || !nearAll(a.specCutDb, b.specCutDb, kSpecBands, 0.1f) || !nearAll(a.specScDb, b.specScDb, kSpecBands, 0.1f)
+        || !nearAll(a.specHz, b.specHz, kSpecBands, 0.5f);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1193,6 +1386,9 @@ void View::paint(float scale)
     drawTextEntry(gfx_);
     paintTooltip(gfx_);
     vg.restore();
+    painted_ = live_;
+    paintedAt_ = clock_;
+    paintedCaretOn_ = caretPhaseOn();
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1246,13 +1442,26 @@ bool View::motion(float x, float y, unsigned mods)
     const Pointer p = pointer(x, y, mods);
     const float dx = x - lastPtr_.x, dy = y - lastPtr_.y;
     lastPtr_ = p;
+    if (entry_.open && entry_.dragging) {
+        entry_.caret = entryStopAt(x);
+        entry_.blinkFrom = clock_;
+        repaint();
+        return true;
+    }
+    Widget* const wasHot = hot_;
+    const std::string wasHint = hint_;
     if (active_ != nullptr) {
         active_->drag(p, dx, dy);
     } else {
         setHot(hitTest(x, y), p);
     }
     updateCursorAndHint(p);
-    repaint();
+    // Hovering must not cost a full frame per mouse event: repaint only for a drag, a new hot
+    // widget or hint, a tooltip (it follows the pointer), or a widget that draws its hover from
+    // the pointer position without reporting it.
+    const bool tooltipShown = settings_.tooltips && hot_ != nullptr && clock_ - hoverSince_ >= 0.7;
+    if (active_ != nullptr || hot_ != wasHot || hint_ != wasHint || tooltipShown || (hot_ != nullptr && hot_->repaintsOnMove()))
+        repaint();
     return true;
 }
 
@@ -1261,6 +1470,10 @@ bool View::mouse(int button, bool press, float x, float y, unsigned mods, unsign
     const Pointer p = pointer(x, y, mods);
     lastPtr_ = p;
     if (!press) {
+        if (entry_.dragging) {
+            entry_.dragging = false;
+            return true;
+        }
         if (active_ != nullptr && button == lastButton_) {
             Widget* a = active_;
             active_ = nullptr;
@@ -1271,8 +1484,27 @@ bool View::mouse(int button, bool press, float x, float y, unsigned mods, unsign
         }
         return true;
     }
+    // a click inside the entry field starts editing the text (drops the select-all, caret at the
+    // end; a double-click selects everything again); a click anywhere else commits it
+    if (entry_.open && button == DGL_NAMESPACE::kMouseButtonLeft && entry_.box.contains(x, y)) {
+        const bool dbl = lastClickW_ == nullptr && timeMs - lastClickT_ < 320;
+        if (dbl) {                    // double-click selects everything
+            entry_.anchor = 0;
+            entry_.caret = entry_.text.size();
+        } else {                      // click places the caret, Shift+click extends, drag selects
+            entry_.caret = entryStopAt(x);
+            if (!p.shift)
+                entry_.anchor = entry_.caret;
+            entry_.dragging = true;
+        }
+        entry_.blinkFrom = clock_;
+        lastClickT_ = timeMs;
+        lastClickW_ = nullptr;
+        win_.winGrabKeyboard();
+        repaint();
+        return true;
+    }
     Widget* w = hitTest(x, y);
-    // a click anywhere but the value-entry field commits it
     if (entry_.open)
         commitEntry();
     if (w == nullptr)
@@ -1315,18 +1547,7 @@ bool View::keyboard(unsigned key, bool press, unsigned mods)
         return false;
     const Pointer p = pointer(lastPtr_.x, lastPtr_.y, mods);
     if (entry_.open) {
-        if (key == kKeyEnter || key == kKeyPadEnter) commitEntry();
-        else if (key == kKeyEscape) cancelEntry();
-        else if (key == kKeyBackspace) {
-            if (entry_.selectAll) entry_.text.clear();
-            else if (!entry_.text.empty()) {
-                // pop one UTF-8 code point
-                std::size_t n = entry_.text.size() - 1;
-                while (n > 0 && (static_cast<unsigned char>(entry_.text[n]) & 0xC0) == 0x80) --n;
-                entry_.text.erase(n);
-            }
-            entry_.selectAll = false;
-        }
+        entryKey(key, p);
         repaint();
         return true;
     }
@@ -1360,16 +1581,12 @@ bool View::character(unsigned cp, unsigned mods)
             if (!ok)
                 return true;
         }
-        if (entry_.selectAll) {
-            entry_.text.clear();
-            entry_.selectAll = false;
-        }
         char buf[5] = {};
         if (cp < 0x80) buf[0] = char(cp == ',' && entry_.param >= 0 ? '.' : cp);
         else if (cp < 0x800) { buf[0] = char(0xC0 | (cp >> 6)); buf[1] = char(0x80 | (cp & 0x3F)); }
         else { buf[0] = char(0xE0 | (cp >> 12)); buf[1] = char(0x80 | ((cp >> 6) & 0x3F)); buf[2] = char(0x80 | (cp & 0x3F)); }
-        if (entry_.text.size() < 64)
-            entry_.text += buf;
+        entryInsert(buf);
+        entry_.blinkFrom = clock_;
         repaint();
         return true;
     }

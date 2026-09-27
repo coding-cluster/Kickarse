@@ -2,6 +2,7 @@
 // ShapeLibrary API (+ Favourites), pager, "Save shape", and the 8 x 2 shape bank.
 #pragma once
 
+#include <array>
 #include <vector>
 
 #include "shared/Shapes.h"
@@ -15,6 +16,8 @@ class EnvelopeEditor;
 class ShapeBank : public Widget {
 public:
     ShapeBank(Services& s, EnvelopeEditor& editor);
+
+    static constexpr int kThumbPoints = 49;
 
     void refresh();                       // re-read the current tab from the ShapeLibrary
     int  pageCount() const;
@@ -34,6 +37,7 @@ private:
     int cellAt(float x, float y) const;   // index into items_ or -1
     EnvelopeEditor& editor_;
     std::vector<ShapeEntry> items_;
+    std::vector<std::array<float, kThumbPoints>> thumbs_;   // curve per item, sampled on refresh
     std::string loadedTab_;
     std::uint32_t loadedRev_ = 0;
     int hover_ = -1;

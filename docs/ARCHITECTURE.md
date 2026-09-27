@@ -51,7 +51,8 @@ additive change possible *only if it is required to compile*, and list it in you
   non-RT thread.
 - `KickarsePlugin` keeps the last state strings (for `getState`) behind a mutex used only by
   non-RT threads.
-- The UI polls the Bridge in `uiIdle()` (~60 Hz) and repaints only what changed.
+- The UI polls the Bridge in `uiIdle()` (~60 Hz) and repaints only what changed: interaction
+  at once, live displays at most 30 times a second and only when they moved (DESIGN.md §13.4).
 
 ## State keys
 `envA`, `envB` (Envelope::serialize), `uiState` (opaque, UI-owned), `presetName`.

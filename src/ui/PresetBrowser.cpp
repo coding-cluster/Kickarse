@@ -268,7 +268,8 @@ void PresetBrowser::paint(Gfx& g)
     g.icon(Icon::Search, kX + 32.f, kY + 30.f, col::textDim, 0.85f);
     const bool hasQ = !query_.empty();
     const float qw = g.text(hasQ ? query_.c_str() : "Search presets", kX + 46.f, kY + 30.5f, {11.f, Font::Sc, hasQ ? col::textHi : col::textDim, Align::Left});
-    if (std::fmod(sv.now(), 1.0) < 0.56)
+    // no caret while a name is being typed in the header (Save as…): the keyboard is there
+    if (!sv.textEntryOpen() && std::fmod(sv.now(), 1.0) < 0.56)
         g.line(kX + 46.f + (hasQ ? qw + 1.5f : 0.f), kY + 24.f, kX + 46.f + (hasQ ? qw + 1.5f : 0.f), kY + 37.f, col::duck, 1.2f);
     const bool closeHot = mx_ >= kX + kW - 40.f && mx_ < kX + kW - 12.f && my_ >= kY + 16.f && my_ < kY + 44.f;
     if (closeHot) g.fillRR(kX + kW - 40.f, kY + 16.f, 28.f, 28.f, 3.f, col::warm.withAlpha(0.05f));

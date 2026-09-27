@@ -36,7 +36,6 @@ constexpr int   kChunk          = SpectralDucker::kMaxChunk;
 constexpr float kParamSmoothMs  = 15.f;
 constexpr float kFreqSmoothMs   = 20.f;
 constexpr float kBypassFadeMs   = 10.f;
-constexpr float kMaxEnvSmoothMs = 20.f;
 constexpr int   kXoverCtlPeriod = 16;
 constexpr float kOutPeakDecayMs = 300.f;
 
@@ -348,8 +347,7 @@ void Engine::Impl::configure(const Snapshot& s, const TransportInfo& transport, 
     tableA = &tables[0].acquire();
     tableB = &tables[1].acquire();
 
-    const double envMs = kMaxEnvSmoothMs * double(s.smooth01) * double(s.smooth01);
-    envCoef            = onePoleCoef(envMs, sampleRate);
+    envCoef = onePoleCoef(envSmoothMs(s.smooth01), sampleRate);
 
     depth.target      = s.depth;
     loMix.target      = s.loMix;
