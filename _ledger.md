@@ -35,3 +35,19 @@ Append-only record of work done in this repository (newest last). Read it before
   load in the plugin host shows there. pugl on Windows uses swap interval 1 (vsync), which some
   drivers busy-wait. Remaining per-frame cost is NanoVG tessellation + text (static widgets redrawn
   every frame); next step would be caching static layers in an FBO.
+
+## 09/27/2026 — Text entry: caret, selection, word navigation
+
+- Changed: src/ui/View.h/.cpp — Entry keeps caret/anchor (UTF-8 byte offsets) instead of a
+  select-all flag; entryKey() handles Left/Right (Ctrl = word, Shift = extend), Home/End,
+  Backspace/Delete (Ctrl = word), Ctrl+A; typing replaces the selection; click places the caret,
+  Shift+click extends, drag selects, double-click selects all; blink restarts on each edit.
+  drawEntry() records caret stops (x per code point) for drawing and mouse hits.
+  docs/design/DESIGN.md §6.11.
+- Reused: existing entry plumbing (open/commit/cancel, box hit test); stdlib only.
+- Verified: harness entry test 19/19 (real View::keyboard/character/mouse/motion), UI self-test
+  28/28, DSP 42/42, editor 63/63, presets 36/36; View.cpp -Wall -Wextra clean (2 pre-existing
+  sign-compare warnings). Screenshot: selection and caret land on glyph boundaries.
+- Notes: Shift+letters already worked (pugl turns WM_CHAR into text); the missing piece was a
+  caret. Commit trims leading/trailing spaces (pre-existing). No clipboard yet (Ctrl+C/V/X);
+  the preset browser's search field still only appends.

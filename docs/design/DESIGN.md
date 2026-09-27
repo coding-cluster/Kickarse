@@ -599,8 +599,13 @@ The exact paths are in the prototype's `icon()` switch. Port them verbatim to `I
 * Opens in place of the value text; width = max(56, text + 18), height 20, radius 3.
 * Styling per §3.4.
 * Opens with the current value selected. Digits, `.`, `-` and `k` are accepted ("2.5k" → 2500).
-  Backspace edits, Enter commits (clamped, one undo step), Esc cancels, and a click elsewhere
-  commits.
+  Enter commits (clamped, one undo step), Esc cancels, and a click elsewhere commits.
+* The same field names presets and shapes. Editing follows Windows edit controls: typing
+  replaces the selection; Left/Right move by character, Ctrl+Left/Right by word, Home/End to the
+  ends, and Shift with any of them extends the selection; Backspace/Delete remove the selection
+  or one character (Ctrl: one word); Ctrl+A selects all. A click inside places the caret,
+  Shift+click extends, dragging selects, a double-click selects everything. The caret restarts
+  its blink, visible, on every edit or move.
 * Keyboard input comes from DGL `onCharacterInput` / `onKeyboard`.
 
 ### 6.12 Context menus

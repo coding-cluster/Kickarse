@@ -3,6 +3,7 @@
 #include "View.h"
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -70,6 +71,51 @@ std::string fmtMs(float ms)
     if (ms < 1000.f) std::snprintf(buf, sizeof(buf), "%.0f ms", double(ms));
     else std::snprintf(buf, sizeof(buf), "%.2f s", double(ms / 1000.f));
     return buf;
+}
+
+// Text-entry caret movement over UTF-8: by code point, and by word the way Windows edit fields do
+// it (Ctrl+Right lands at the start of the next word, Ctrl+Left at the start of this/previous one).
+bool utf8Cont(char c) { return (static_cast<unsigned char>(c) & 0xC0) == 0x80; }
+
+std::size_t prevCp(const std::string& s, std::size_t i)
+{
+    if (i == 0) return 0;
+    do --i; while (i > 0 && utf8Cont(s[i]));
+    return i;
+}
+
+std::size_t nextCp(const std::string& s, std::size_t i)
+{
+    if (i >= s.size()) return s.size();
+    do ++i; while (i < s.size() && utf8Cont(s[i]));
+    return i;
+}
+
+int charClass(char c)   // 0 space, 1 word (letters, digits, anything non-ASCII), 2 punctuation
+{
+    const unsigned char u = static_cast<unsigned char>(c);
+    if (u == ' ' || u == '\t') return 0;
+    return (u >= 0x80 || std::isalnum(u)) ? 1 : 2;
+}
+
+std::size_t nextWord(const std::string& s, std::size_t i)
+{
+    if (i < s.size()) {
+        const int c = charClass(s[i]);
+        while (i < s.size() && charClass(s[i]) == c) ++i;   // continuation bytes are class 1 too
+    }
+    while (i < s.size() && charClass(s[i]) == 0) ++i;
+    return i;
+}
+
+std::size_t prevWord(const std::string& s, std::size_t i)
+{
+    while (i > 0 && charClass(s[i - 1]) == 0) --i;
+    if (i > 0) {
+        const int c = charClass(s[i - 1]);
+        while (i > 0 && charClass(s[i - 1]) == c) --i;
+    }
+    return i;
 }
 
 } // namespace
@@ -699,7 +745,9 @@ void View::openEntry(int paramId)
     else
         std::snprintf(buf, sizeof(buf), "%g", std::round(double(v) * 100.0) / 100.0);
     entry_.text = buf;
-    entry_.selectAll = true;
+    entry_.anchor = 0;
+    entry_.caret = entry_.text.size();
+    entry_.blinkFrom = clock_;
     win_.winGrabKeyboard();
     repaint();
 }
@@ -711,7 +759,9 @@ void View::openTextEntry(const std::string& initial, float cx, float cy, float w
     entry_.open = true;
     entry_.param = -1;
     entry_.text = initial;
-    entry_.selectAll = true;
+    entry_.anchor = 0;
+    entry_.caret = entry_.text.size();
+    entry_.blinkFrom = clock_;
     entry_.cx = cx;
     entry_.cy = cy;
     entry_.width = width;
@@ -722,17 +772,112 @@ void View::openTextEntry(const std::string& initial, float cx, float cy, float w
 
 void View::drawEntry(Gfx& g, float cx, float cy, float size)
 {
-    const std::string t = entry_.text.empty() ? std::string(" ") : entry_.text;
-    const float tw = g.measure(t.c_str(), size, Font::ScSemi);
+    const std::string& s = entry_.text;
+    const float tw = s.empty() ? 0.f : g.measure(s.c_str(), size, Font::ScSemi);
     const float w = std::max(entry_.param < 0 ? entry_.width : 56.f, tw + 18.f);
     entry_.box = {cx - w * 0.5f, cy - 10.f, w, 20.f};
     g.fillRR(cx - w * 0.5f, cy - 10.f, w, 20.f, 3.f, col::ink0);
     g.strokeRR(cx - w * 0.5f + 0.5f, cy - 9.5f, w - 1.f, 19.f, 3.f, col::duck);
-    if (entry_.selectAll && !entry_.text.empty())
-        g.fillRR(cx - tw * 0.5f - 2.f, cy - 7.f, tw + 4.f, 14.f, 2.f, col::duck.withAlpha(0.3f));
-    g.text(t.c_str(), cx, cy, {size, Font::ScSemi, col::textHi, Align::Center});
-    if (!entry_.selectAll && std::fmod(clock_, 1.0) < 0.56)
-        g.line(cx + tw * 0.5f + 1.5f, cy - 6.f, cx + tw * 0.5f + 1.5f, cy + 6.f, col::duck, 1.2f);
+    // caret stops (every code point boundary) and their x, for drawing and for mouse hits
+    const float x0 = cx - tw * 0.5f;
+    entry_.stops.clear();
+    entry_.stopX.clear();
+    for (std::size_t i = 0;; i = nextCp(s, i)) {
+        entry_.stops.push_back(i);
+        entry_.stopX.push_back(i == 0 ? x0 : i >= s.size() ? x0 + tw : x0 + g.measure(s.substr(0, i).c_str(), size, Font::ScSemi));
+        if (i >= s.size())
+            break;
+    }
+    auto xAt = [&](std::size_t b) {
+        const auto it = std::lower_bound(entry_.stops.begin(), entry_.stops.end(), b);
+        return entry_.stopX[std::size_t(std::min(it - entry_.stops.begin(), std::ptrdiff_t(entry_.stopX.size()) - 1))];
+    };
+    if (entry_.caret != entry_.anchor) {
+        const float a = xAt(std::min(entry_.caret, entry_.anchor)), b = xAt(std::max(entry_.caret, entry_.anchor));
+        g.fillRR(a - 1.f, cy - 7.f, b - a + 2.f, 14.f, 2.f, col::duck.withAlpha(0.3f));
+    }
+    if (!s.empty())
+        g.text(s.c_str(), cx, cy, {size, Font::ScSemi, col::textHi, Align::Center});
+    if (entry_.caret == entry_.anchor && caretPhaseOn()) {
+        const float x = xAt(entry_.caret) + 0.5f;
+        g.line(x, cy - 6.f, x, cy + 6.f, col::duck, 1.2f);
+    }
+}
+
+bool View::caretPhaseOn() const
+{
+    return std::fmod(clock_ - (entry_.open ? entry_.blinkFrom : 0.0), 1.0) < 0.56;
+}
+
+std::size_t View::entryStopAt(float x) const
+{
+    std::size_t best = entry_.text.size();
+    float bestD = 1e9f;
+    for (std::size_t i = 0; i < entry_.stops.size(); ++i) {
+        const float d = std::fabs(entry_.stopX[i] - x);
+        if (d < bestD) { bestD = d; best = entry_.stops[i]; }
+    }
+    return best;
+}
+
+void View::entryErase(std::size_t from, std::size_t to)
+{
+    if (to > from)
+        entry_.text.erase(from, to - from);
+    entry_.caret = entry_.anchor = from;
+}
+
+void View::entryInsert(const std::string& s)
+{
+    const std::size_t lo = std::min(entry_.caret, entry_.anchor), hi = std::max(entry_.caret, entry_.anchor);
+    if (entry_.text.size() - (hi - lo) + s.size() > 64)
+        return;
+    entryErase(lo, hi);
+    entry_.text.insert(lo, s);
+    entry_.caret = entry_.anchor = lo + s.size();
+}
+
+void View::entryKey(unsigned key, const Pointer& p)
+{
+    using namespace DGL_NAMESPACE;
+    Entry& e = entry_;
+    const std::string& s = e.text;
+    const std::size_t lo = std::min(e.caret, e.anchor), hi = std::max(e.caret, e.anchor);
+    const bool sel = lo != hi;
+    e.blinkFrom = clock_;
+    auto moveTo = [&](std::size_t to) {   // Shift extends the selection, otherwise it collapses
+        e.caret = to;
+        if (!p.shift)
+            e.anchor = to;
+    };
+    switch (key) {
+    case kKeyEnter: case kKeyPadEnter: commitEntry(); return;
+    case kKeyEscape: cancelEntry(); return;
+    case kKeyLeft:
+        if (sel && !p.shift && !p.ctrl) moveTo(lo);
+        else moveTo(p.ctrl ? prevWord(s, e.caret) : prevCp(s, e.caret));
+        return;
+    case kKeyRight:
+        if (sel && !p.shift && !p.ctrl) moveTo(hi);
+        else moveTo(p.ctrl ? nextWord(s, e.caret) : nextCp(s, e.caret));
+        return;
+    case kKeyHome: moveTo(0); return;
+    case kKeyEnd: moveTo(s.size()); return;
+    case kKeyBackspace:
+        if (sel) entryErase(lo, hi);
+        else entryErase(p.ctrl ? prevWord(s, e.caret) : prevCp(s, e.caret), e.caret);
+        return;
+    case kKeyDelete:
+        if (sel) entryErase(lo, hi);
+        else entryErase(e.caret, p.ctrl ? nextWord(s, e.caret) : nextCp(s, e.caret));
+        return;
+    default:
+        if (p.ctrl && (key == 'a' || key == 'A')) {
+            e.anchor = 0;
+            e.caret = s.size();
+        }
+        return;   // the field owns the keyboard while it is open
+    }
 }
 
 void View::drawTextEntry(Gfx& g)
@@ -874,7 +1019,7 @@ void View::saveUserPreset(const std::string& name, bool overwrite)
             // name taken by another user preset: say so and ask again, caret at the end of the name
             saveMsg_ = "Name taken";
             openTextEntry(name, 468.f, 22.f, 220.f, [this](const std::string& n) { saveUserPreset(n, false); });
-            entry_.selectAll = false;
+            entry_.anchor = entry_.caret;
         } else {
             saveMsg_ = "Save failed";
         }
@@ -1151,7 +1296,7 @@ bool View::idle(Bridge* bridge, double dt)
     // Everything else is ambient and painted at most kAmbientFps: live displays only when what
     // they show actually moved since the last paint (a stopped transport or a silent sidechain
     // costs nothing), text carets only when they blink.
-    const bool caretOn = std::fmod(clock_, 1.0) < 0.56;
+    const bool caretOn = caretPhaseOn();
     const bool caretDue = (entry_.open || browser_->isOpen()) && caretOn != paintedCaretOn_;
     const bool ambient = demoMode_ || savedFlash_ > 0.f || caretDue || liveMoved(live_, painted_, envelopeAtRest());
     return ambient && clock_ - paintedAt_ >= 1.0 / kAmbientFps - 1e-3;
@@ -1251,7 +1396,7 @@ void View::paint(float scale)
     vg.restore();
     painted_ = live_;
     paintedAt_ = clock_;
-    paintedCaretOn_ = std::fmod(clock_, 1.0) < 0.56;
+    paintedCaretOn_ = caretPhaseOn();
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1305,6 +1450,12 @@ bool View::motion(float x, float y, unsigned mods)
     const Pointer p = pointer(x, y, mods);
     const float dx = x - lastPtr_.x, dy = y - lastPtr_.y;
     lastPtr_ = p;
+    if (entry_.open && entry_.dragging) {
+        entry_.caret = entryStopAt(x);
+        entry_.blinkFrom = clock_;
+        repaint();
+        return true;
+    }
     Widget* const wasHot = hot_;
     const std::string wasHint = hint_;
     if (active_ != nullptr) {
@@ -1327,6 +1478,10 @@ bool View::mouse(int button, bool press, float x, float y, unsigned mods, unsign
     const Pointer p = pointer(x, y, mods);
     lastPtr_ = p;
     if (!press) {
+        if (entry_.dragging) {
+            entry_.dragging = false;
+            return true;
+        }
         if (active_ != nullptr && button == lastButton_) {
             Widget* a = active_;
             active_ = nullptr;
@@ -1340,8 +1495,17 @@ bool View::mouse(int button, bool press, float x, float y, unsigned mods, unsign
     // a click inside the entry field starts editing the text (drops the select-all, caret at the
     // end; a double-click selects everything again); a click anywhere else commits it
     if (entry_.open && button == DGL_NAMESPACE::kMouseButtonLeft && entry_.box.contains(x, y)) {
-        const bool dbl = !entry_.selectAll && timeMs - lastClickT_ < 320;
-        entry_.selectAll = dbl;
+        const bool dbl = lastClickW_ == nullptr && timeMs - lastClickT_ < 320;
+        if (dbl) {                    // double-click selects everything
+            entry_.anchor = 0;
+            entry_.caret = entry_.text.size();
+        } else {                      // click places the caret, Shift+click extends, drag selects
+            entry_.caret = entryStopAt(x);
+            if (!p.shift)
+                entry_.anchor = entry_.caret;
+            entry_.dragging = true;
+        }
+        entry_.blinkFrom = clock_;
         lastClickT_ = timeMs;
         lastClickW_ = nullptr;
         win_.winGrabKeyboard();
@@ -1391,19 +1555,7 @@ bool View::keyboard(unsigned key, bool press, unsigned mods)
         return false;
     const Pointer p = pointer(lastPtr_.x, lastPtr_.y, mods);
     if (entry_.open) {
-        if (key == kKeyEnter || key == kKeyPadEnter) commitEntry();
-        else if (key == kKeyEscape) cancelEntry();
-        else if (key == kKeyBackspace) {
-            if (entry_.selectAll) entry_.text.clear();
-            else if (!entry_.text.empty()) {
-                // pop one UTF-8 code point
-                std::size_t n = entry_.text.size() - 1;
-                while (n > 0 && (static_cast<unsigned char>(entry_.text[n]) & 0xC0) == 0x80) --n;
-                entry_.text.erase(n);
-            }
-            entry_.selectAll = false;
-        } else if (key == kKeyLeft || key == kKeyRight || key == kKeyHome || key == kKeyEnd) entry_.selectAll = false;
-        else if (p.ctrl && (key == 'a' || key == 'A')) entry_.selectAll = true;
+        entryKey(key, p);
         repaint();
         return true;
     }
@@ -1437,16 +1589,12 @@ bool View::character(unsigned cp, unsigned mods)
             if (!ok)
                 return true;
         }
-        if (entry_.selectAll) {
-            entry_.text.clear();
-            entry_.selectAll = false;
-        }
         char buf[5] = {};
         if (cp < 0x80) buf[0] = char(cp == ',' && entry_.param >= 0 ? '.' : cp);
         else if (cp < 0x800) { buf[0] = char(0xC0 | (cp >> 6)); buf[1] = char(0x80 | (cp & 0x3F)); }
         else { buf[0] = char(0xE0 | (cp >> 12)); buf[1] = char(0x80 | ((cp >> 6) & 0x3F)); buf[2] = char(0x80 | (cp & 0x3F)); }
-        if (entry_.text.size() < 64)
-            entry_.text += buf;
+        entryInsert(buf);
+        entry_.blinkFrom = clock_;
         repaint();
         return true;
     }

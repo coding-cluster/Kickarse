@@ -133,6 +133,11 @@ private:
     void    updateCursorAndHint(const Pointer& p);
     void    commitEntry();
     void    cancelEntry();
+    void    entryKey(unsigned key, const Pointer& p);   // editing keys while an entry is open
+    void    entryInsert(const std::string& s);
+    void    entryErase(std::size_t from, std::size_t to);
+    std::size_t entryStopAt(float x) const;              // nearest caret position to x
+    bool    caretPhaseOn() const;
     void    paintChassis(Gfx& g);
     void    paintTooltip(Gfx& g);
     void    pollBridge(Bridge* bridge, double dt);
@@ -182,9 +187,15 @@ private:
         bool open = false;
         int  param = -1;          // -1 = free text entry
         std::string text;
-        bool selectAll = true;
+        // caret and selection as UTF-8 byte offsets on code point boundaries; the selection is
+        // [min(anchor, caret), max(anchor, caret)), empty when they are equal
+        std::size_t caret = 0, anchor = 0;
+        bool dragging = false;    // mouse-selecting inside the field
+        double blinkFrom = 0.0;   // caret blink restarts (visible) on every edit or move
         float cx = 0.f, cy = 0.f, width = 0.f;
         RectF box;                // where the field was last drawn: clicks inside it edit, not commit
+        std::vector<std::size_t> stops;   // caret positions (byte offsets) as last drawn ...
+        std::vector<float> stopX;         // ... and their x
         std::function<void(const std::string&)> commit;
     } entry_;
 
